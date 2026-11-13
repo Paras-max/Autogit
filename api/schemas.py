@@ -33,6 +33,10 @@ class RepositoryResponse(BaseModel):
     current_branch: Optional[str] = None
     created_at: str
     latest_commit: Optional[CommitInfoSchema] = None
+    name: Optional[str] = None
+    path: Optional[str] = None
+    repo_id: Optional[int] = None
+    permissions: Optional[Dict[str, Any]] = None
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -44,6 +48,10 @@ class RepositorySummaryResponse(BaseModel):
     remote_url: Optional[str] = None
     current_branch: Optional[str] = None
     created_at: str
+    name: Optional[str] = None
+    path: Optional[str] = None
+    repo_id: Optional[int] = None
+    permissions: Optional[Dict[str, Any]] = None
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -383,4 +391,24 @@ class ServiceStatusResponse(BaseModel):
     lock_file: str
     uptime_seconds: Optional[int] = None
     status: str = "running"
+
+
+# ============================================================================
+# GitHub Import Schema
+# ============================================================================
+
+class GitHubImportRequest(BaseModel):
+    """Request body for cloning a GitHub repository and registering it locally."""
+    github_url: str = Field(
+        ...,
+        description="HTTPS or SSH GitHub URL (e.g. https://github.com/owner/repo.git)",
+    )
+    destination_folder: str = Field(
+        ...,
+        description="Local folder path to clone the repository INTO",
+    )
+    name: Optional[str] = Field(
+        None,
+        description="Optional custom name override for the repository",
+    )
 

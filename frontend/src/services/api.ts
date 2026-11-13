@@ -21,13 +21,54 @@ async function fetchJSON<T>(url: string, options?: RequestInit): Promise<T> {
 }
 
 // ─── Repositories ─────────────────────────────────────────────────────────────
-const getRepositories = () => fetchJSON<any[]>(`${API_BASE}/repositories`);
+const getRepositories = async () => {
+  const list = await fetchJSON<any[]>(`${API_BASE}/repositories`);
+  return list.map((r: any) => ({
+    ...r,
+    id: r.id ?? r.repo_id,
+    repo_id: r.repo_id ?? r.id,
+    repository_name: r.repository_name || r.name,
+    name: r.name || r.repository_name,
+    repository_path: r.repository_path || r.path,
+    path: r.path || r.repository_path,
+  }));
+};
 
-const addRepository = (path: string, name?: string) =>
-  fetchJSON<any>(`${API_BASE}/repositories`, {
+const addRepository = async (path: string, name?: string) => {
+  const r = await fetchJSON<any>(`${API_BASE}/repositories`, {
     method: 'POST',
     body: JSON.stringify({ path, name }),
   });
+  return {
+    ...r,
+    id: r.id ?? r.repo_id,
+    repo_id: r.repo_id ?? r.id,
+    repository_name: r.repository_name || r.name,
+    name: r.name || r.repository_name,
+    repository_path: r.repository_path || r.path,
+    path: r.path || r.repository_path,
+  };
+};
+
+const importGitHubRepository = async (
+  githubUrl: string,
+  destinationFolder: string,
+  name?: string,
+) => {
+  const r = await fetchJSON<any>(`${API_BASE}/repositories/import-github`, {
+    method: 'POST',
+    body: JSON.stringify({ github_url: githubUrl, destination_folder: destinationFolder, name }),
+  });
+  return {
+    ...r,
+    id: r.id ?? r.repo_id,
+    repo_id: r.repo_id ?? r.id,
+    repository_name: r.repository_name || r.name,
+    name: r.name || r.repository_name,
+    repository_path: r.repository_path || r.path,
+    path: r.path || r.repository_path,
+  };
+};
 
 const removeRepository = (id: string | number) =>
   fetchJSON<any>(`${API_BASE}/repositories/${id}`, { method: 'DELETE' });
@@ -50,6 +91,9 @@ const disableDevelopment = (repoId: string | number) =>
 // ─── GitHub Sync & Remote Status ──────────────────────────────────────────────
 const getGitHubAccount = () => fetchJSON<any>(`${API_BASE}/github/account`);
 
+const getGitHubRepositories = (perPage = 50) =>
+  fetchJSON<any[]>(`${API_BASE}/github/repositories?per_page=${perPage}`);
+
 const disconnectGitHub = () =>
   fetchJSON<any>(`${API_BASE}/github/disconnect`, { method: 'POST' });
 
@@ -60,7 +104,16 @@ const fetchRepository = (repoId: string | number) =>
   fetchJSON<any>(`${API_BASE}/github/sync/fetch/${repoId}`, { method: 'POST' });
 
 const pushRepository = (repoId: string | number, branch?: string) =>
-  fetchJSON<any>(`${API_BASE}/github/sync/push/${repoId}${branch ? `?branch=${branch}` : ''}`, { method: 'POST' });
+  fetchJSON<any>(`${API_BASE}/github/sync/push/${repoId}${branch ? `?branch=${encodeURIComponent(branch)}` : ''}`, { method: 'POST' });
+
+const pushBranch = (repoId: string | number, branch: string) =>
+  fetchJSON<any>(`${API_BASE}/github/sync/push-branch/${repoId}?branch=${encodeURIComponent(branch)}`, { method: 'POST' });
+
+const pushExecutionCommit = (executionId: string | number) =>
+  fetchJSON<any>(`${API_BASE}/commits/${executionId}/push`, { method: 'POST' });
+
+const getExecutionSyncStatus = (executionId: string | number) =>
+  fetchJSON<any>(`${API_BASE}/commits/${executionId}/sync-status`);
 
 // Legacy aliases kept for compatibility
 const fetchRemote = fetchRepository;
@@ -189,6 +242,7 @@ export const api = {
   // Repositories
   getRepositories,
   addRepository,
+  importGitHubRepository,
   removeRepository,
   getRepositoryPermissions,
   updateRepositoryPermissions,
@@ -196,10 +250,14 @@ export const api = {
   disableDevelopment,
   // GitHub
   getGitHubAccount,
+  getGitHubRepositories,
   disconnectGitHub,
   getRemoteStatus,
   fetchRepository,
   pushRepository,
+  pushBranch,
+  pushExecutionCommit,
+  getExecutionSyncStatus,
   fetchRemote,
   pushRemote,
   getSyncHistory,
@@ -247,10 +305,10 @@ export const api = {
 
 // Named exports for backward compatibility with existing pages
 export {
-  getRepositories, addRepository, removeRepository,
+  getRepositories, addRepository, importGitHubRepository, removeRepository,
   getRepositoryPermissions, updateRepositoryPermissions,
   enableDevelopment, disableDevelopment,
-  getGitHubAccount, disconnectGitHub,
+  getGitHubAccount, getGitHubRepositories, disconnectGitHub,
   getRemoteStatus, fetchRemote, pushRemote, getSyncHistory,
   getWeeklySchedule, generateSchedule, pauseScheduler, resumeScheduler,
   getTasks, addTask, runDevelopmentSession,

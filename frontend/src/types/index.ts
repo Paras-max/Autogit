@@ -61,6 +61,9 @@ export interface CommitRecord {
   repository_id?: number;
   repository_name?: string;
   github_commit_url?: string | null;
+  // Push sync state machine
+  push_sync_status?: 'LOCAL_ONLY' | 'PENDING_APPROVAL' | 'READY_TO_PUSH' | 'PUSHING' | 'PUSHED' | 'PUSH_FAILED' | 'REMOTE_CONFLICT';
+  execution_id?: number | null;
 }
 
 // Legacy alias kept for compatibility
@@ -156,8 +159,23 @@ export interface AIAgentInfo {
   last_run?: string | null;
 }
 
+export interface RemoteGitHubRepo {
+  id: number;
+  name: string;
+  full_name: string;
+  private: boolean;
+  html_url: string;
+  clone_url: string;
+  ssh_url?: string;
+  default_branch: string;
+  description?: string | null;
+  updated_at?: string;
+  pushed_at?: string;
+}
+
 export interface GitHubAccount {
-  login: string;
+  id?: number;
+  login?: string;
   name?: string | null;
   avatar_url?: string | null;
   html_url?: string | null;
@@ -168,14 +186,25 @@ export interface GitHubAccount {
   rate_limit_limit?: number;
   rate_limit_remaining?: number;
   rate_limit_reset?: number;
-  // Wrapped form
+  token_preview?: string | null;
+  status?: string;
   authenticated?: boolean;
+  error?: string | null;
   user?: {
+    id?: number;
     login: string;
-    name?: string;
-    avatar_url?: string;
-    html_url?: string;
+    name?: string | null;
+    avatar_url?: string | null;
+    html_url?: string | null;
     public_repos?: number;
+    total_private_repos?: number;
+    followers?: number;
+    following?: number;
+  } | null;
+  rate_limit?: {
+    limit: number;
+    remaining: number;
+    reset: number;
   } | null;
 }
 

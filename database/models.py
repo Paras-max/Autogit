@@ -59,6 +59,17 @@ class ExecutionHistoryModel:
     completed_at: Optional[str] = None
     error_summary: Optional[str] = None
     proposal_data: Optional[str] = None  # JSON serialized dictionary
+    push_sync_status: Optional[str] = "LOCAL_ONLY"  # LOCAL_ONLY, PENDING_APPROVAL, READY_TO_PUSH, PUSHING, PUSHED, PUSH_FAILED, REMOTE_CONFLICT, VERIFICATION_FAILED
+    branch_name: Optional[str] = None  # Branch this commit lives on (for push routing)
+    local_commit_hash: Optional[str] = None
+    remote_commit_hash: Optional[str] = None
+    remote_advanced: bool = False
+    verification_status: Optional[str] = None  # 'VERIFIED', 'FAILED', 'ADVANCED', 'SKIPPED'
+    source_branch: Optional[str] = None
+    target_branch: Optional[str] = None
+    remote_name: Optional[str] = None
+    push_timestamp: Optional[str] = None
+    push_error: Optional[str] = None
 
 
 @dataclass
@@ -246,4 +257,23 @@ class DashboardPreferenceModel:
     preference_key: str
     preference_value: str
     updated_at: str = ""
+
+
+@dataclass
+class PullRequestModel:
+    id: Optional[int]
+    repository_id: int
+    pr_number: int
+    title: str
+    source_branch: str
+    target_branch: str
+    state: str  # 'open', 'closed', 'merged', 'draft'
+    html_url: str
+    is_merged: bool = False
+    created_at: str = ""
+    updated_at: str = ""
+    merged_at: Optional[str] = None
+    body: Optional[str] = None
+    diff_url: Optional[str] = None
+
 

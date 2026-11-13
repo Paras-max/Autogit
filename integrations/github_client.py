@@ -74,20 +74,35 @@ class GitHubClient:
                 if res.status_code == 200:
                     data = res.json()
                     user_profile = {
+                        "id": data.get("id"),
                         "login": data.get("login"),
                         "name": data.get("name"),
                         "avatar_url": data.get("avatar_url"),
                         "html_url": data.get("html_url"),
                         "public_repos": data.get("public_repos", 0),
                         "total_private_repos": data.get("total_private_repos", 0),
+                        "followers": data.get("followers", 0),
+                        "following": data.get("following", 0),
                     }
                     rate_limit = await self.get_rate_limit(token)
                     return {
                         "authenticated": True,
                         "status": AUTH_STATUS_VALID,
                         "user": user_profile,
+                        "id": user_profile["id"],
+                        "login": user_profile["login"],
+                        "name": user_profile["name"],
+                        "avatar_url": user_profile["avatar_url"],
+                        "html_url": user_profile["html_url"],
+                        "public_repos": user_profile["public_repos"],
+                        "total_private_repos": user_profile["total_private_repos"],
+                        "followers": user_profile["followers"],
+                        "following": user_profile["following"],
                         "token_preview": mask_secret(token),
                         "rate_limit": rate_limit,
+                        "rate_limit_limit": rate_limit.get("limit", 5000),
+                        "rate_limit_remaining": rate_limit.get("remaining", 5000),
+                        "rate_limit_reset": rate_limit.get("reset", 0),
                     }
                 else:
                     return {
@@ -150,13 +165,17 @@ class GitHubClient:
                     repos = res.json()
                     return [
                         {
+                            "id": r.get("id"),
                             "name": r.get("name"),
                             "full_name": r.get("full_name"),
                             "private": r.get("private", False),
                             "html_url": r.get("html_url"),
                             "clone_url": r.get("clone_url"),
+                            "ssh_url": r.get("ssh_url"),
                             "default_branch": r.get("default_branch", "main"),
+                            "description": r.get("description"),
                             "updated_at": r.get("updated_at"),
+                            "pushed_at": r.get("pushed_at"),
                         }
                         for r in repos
                     ]

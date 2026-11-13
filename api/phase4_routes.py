@@ -14,8 +14,8 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from fastapi.responses import StreamingResponse
-
 from api.routes import get_db
+from database.execution_repository import ExecutionRepository
 from api.schemas import (
     CommitDetailResponse,
     DashboardActivityItem,
@@ -86,6 +86,14 @@ def get_health_monitor(db_mgr: DatabaseManager = Depends(get_db)) -> HealthMonit
 @phase4_router.get("/github/account", summary="Get authenticated GitHub account info and rate limit")
 async def get_github_account(client: GitHubClient = Depends(get_github_client)):
     return await client.get_account_info()
+
+
+@phase4_router.get("/github/repositories", summary="List remote GitHub repositories accessible with token")
+async def get_github_repositories(
+    per_page: int = 50,
+    client: GitHubClient = Depends(get_github_client),
+):
+    return await client.list_repositories(per_page=per_page)
 
 
 @phase4_router.post("/github/disconnect", response_model=GenericMessageResponse, summary="Disconnect GitHub account")
@@ -323,9 +331,31 @@ def list_commits(
         git_mgr = GitManager(repo_path)
         branch = git_mgr.get_current_branch() or "main"
 
-        # Read git log: format: hash|author|date|subject
+        # Build mapping of commit_hash -> (push_sync_status, execution_id) from execution_history
+        hash_to_sync: Dict[str, Any] = {}
+        with db_mgr.get_cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT id, commit_hash, push_sync_status, branch_name
+                FROM execution_history
+                WHERE repository_id = ? AND commit_hash IS NOT NULL
+                ORDER BY id DESC
+                """,
+                (repo.id,),
+            )
+            for row in cursor.fetchall():
+                d = dict(row)
+                ch = (d.get("commit_hash") or "").strip()
+                if ch and ch not in hash_to_sync:
+                    hash_to_sync[ch] = {
+                        "push_sync_status": d.get("push_sync_status", "LOCAL_ONLY"),
+                        "execution_id": d["id"],
+                        "branch_name": d.get("branch_name"),
+                    }
+
+        # Read git log: format: hash|short_hash|author|date|subject
         exit_code, stdout, _ = safe_subprocess_run(
-            ["git", "log", f"-{limit}", "--pretty=format:%H|%h|%an|%cI|%s"],
+            ["git", "log", f"-{limit}", "--pretty=format:%H|%h|%an|%cI|%s", "--all"],
             cwd=repo_path,
             timeout=10.0,
         )
@@ -335,6 +365,24 @@ def list_commits(
                 if len(parts) >= 5:
                     fhash, shash, author, dt, subj = parts
                     github_url = f"{repo.remote_url.rstrip('.git')}/commit/{fhash}" if repo.remote_url and "github.com" in repo.remote_url else None
+
+                    # Determine push_sync_status: check if on origin
+                    sync_info = hash_to_sync.get(fhash) or {}
+                    push_sync_status = sync_info.get("push_sync_status", "LOCAL_ONLY")
+                    execution_id = sync_info.get("execution_id")
+
+                    # If not in DB, check if already pushed via git branch -r --contains
+                    if not sync_info:
+                        rc_br, br_out, _ = safe_subprocess_run(
+                            ["git", "branch", "-r", "--contains", fhash],
+                            cwd=repo_path,
+                            timeout=5.0,
+                        )
+                        if rc_br == 0 and "origin/" in br_out:
+                            push_sync_status = "PUSHED"
+                        else:
+                            push_sync_status = "LOCAL_ONLY"
+
                     commits_list.append(
                         {
                             "commit_hash": fhash,
@@ -342,10 +390,12 @@ def list_commits(
                             "message": subj,
                             "author": author,
                             "date": dt,
-                            "branch": branch,
+                            "branch": sync_info.get("branch_name") or branch,
                             "repository_id": repo.id,
                             "repository_name": repo.repository_name,
                             "github_commit_url": github_url,
+                            "push_sync_status": push_sync_status,
+                            "execution_id": execution_id,
                         }
                     )
 
@@ -532,3 +582,267 @@ async def event_stream():
             "X-Accel-Buffering": "no",
         },
     )
+
+
+# ============================================================================
+# 7. Commit Push Sync Endpoints
+# ============================================================================
+
+@phase4_router.get("/commits/pending", summary="List execution history records awaiting approval")
+def get_pending_commits(
+    repository_id: Optional[int] = None,
+    limit: int = 50,
+    db_mgr: DatabaseManager = Depends(get_db),
+):
+    """List execution_history records with status='awaiting_approval'."""
+    with db_mgr.get_cursor() as cursor:
+        if repository_id:
+            cursor.execute(
+                """
+                SELECT e.id, e.repository_id, e.execution_mode, e.status, e.commit_hash,
+                       e.commit_message, e.created_at, e.proposal_data, e.push_sync_status,
+                       e.branch_name, r.repository_name, r.remote_url
+                FROM execution_history e
+                LEFT JOIN repositories r ON e.repository_id = r.id
+                WHERE e.status = 'awaiting_approval' AND e.repository_id = ?
+                ORDER BY e.id DESC LIMIT ?
+                """,
+                (repository_id, limit),
+            )
+        else:
+            cursor.execute(
+                """
+                SELECT e.id, e.repository_id, e.execution_mode, e.status, e.commit_hash,
+                       e.commit_message, e.created_at, e.proposal_data, e.push_sync_status,
+                       e.branch_name, r.repository_name, r.remote_url
+                FROM execution_history e
+                LEFT JOIN repositories r ON e.repository_id = r.id
+                WHERE e.status = 'awaiting_approval'
+                ORDER BY e.id DESC LIMIT ?
+                """,
+                (limit,),
+            )
+        rows = cursor.fetchall()
+
+    result = []
+    for r in rows:
+        d = dict(r)
+        proposal_data = {}
+        try:
+            import json as _json
+            proposal_data = _json.loads(d.get("proposal_data") or "{}")
+        except Exception:
+            pass
+        result.append({
+            "execution_id": d["id"],
+            "repository_id": d["repository_id"],
+            "repository_name": d["repository_name"],
+            "execution_mode": d["execution_mode"],
+            "status": d["status"],
+            "commit_hash": d["commit_hash"],
+            "commit_message": d["commit_message"],
+            "created_at": d["created_at"],
+            "push_sync_status": d.get("push_sync_status", "LOCAL_ONLY"),
+            "branch_name": d.get("branch_name"),
+            "proposed_files": proposal_data.get("staged_files", []),
+        })
+    return result
+
+
+@phase4_router.get("/commits/history", summary="List all execution history records with push sync status")
+def get_commit_execution_history(
+    repository_id: Optional[int] = None,
+    limit: int = 50,
+    db_mgr: DatabaseManager = Depends(get_db),
+):
+    """List execution_history records with their push_sync_status (committed executions + pending)."""
+    with db_mgr.get_cursor() as cursor:
+        if repository_id:
+            cursor.execute(
+                """
+                SELECT e.id, e.repository_id, e.execution_mode, e.status, e.commit_hash,
+                       e.commit_message, e.created_at, e.completed_at, e.error_summary,
+                       e.push_sync_status, e.branch_name, r.repository_name, r.remote_url
+                FROM execution_history e
+                LEFT JOIN repositories r ON e.repository_id = r.id
+                WHERE e.repository_id = ?
+                ORDER BY e.id DESC LIMIT ?
+                """,
+                (repository_id, limit),
+            )
+        else:
+            cursor.execute(
+                """
+                SELECT e.id, e.repository_id, e.execution_mode, e.status, e.commit_hash,
+                       e.commit_message, e.created_at, e.completed_at, e.error_summary,
+                       e.push_sync_status, e.branch_name, r.repository_name, r.remote_url
+                FROM execution_history e
+                LEFT JOIN repositories r ON e.repository_id = r.id
+                ORDER BY e.id DESC LIMIT ?
+                """,
+                (limit,),
+            )
+        rows = cursor.fetchall()
+
+    return [
+        {
+            "execution_id": dict(r)["id"],
+            "repository_id": dict(r)["repository_id"],
+            "repository_name": dict(r)["repository_name"],
+            "execution_mode": dict(r)["execution_mode"],
+            "status": dict(r)["status"],
+            "commit_hash": dict(r)["commit_hash"],
+            "commit_message": dict(r)["commit_message"],
+            "created_at": dict(r)["created_at"],
+            "completed_at": dict(r)["completed_at"],
+            "error_summary": dict(r)["error_summary"],
+            "push_sync_status": dict(r).get("push_sync_status", "LOCAL_ONLY"),
+            "branch_name": dict(r).get("branch_name"),
+            "remote_url": dict(r)["remote_url"],
+        }
+        for r in rows
+    ]
+
+
+@phase4_router.post("/commits/{execution_id}/push", summary="Push the branch containing a specific committed execution")
+def push_execution_commit(
+    execution_id: int,
+    db_mgr: DatabaseManager = Depends(get_db),
+    sync_engine: GitHubSyncEngine = Depends(get_sync_engine),
+):
+    """
+    Push the branch that contains the given execution's commit to origin.
+    Steps:
+    1. Load execution record from DB.
+    2. Verify status=committed and commit_hash is set.
+    3. Determine branch from execution record or development_sessions.
+    4. Update push_sync_status to PUSHING.
+    5. Call sync_engine.push_repository with that branch.
+    6. Return result.
+    """
+    import json as _json
+
+    exec_repo = ExecutionRepository(db_mgr)
+    execution = exec_repo.get_execution(execution_id)
+    if not execution:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Execution {execution_id} not found.")
+
+    if execution.status not in ("committed", "approved"):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Execution {execution_id} has status='{execution.status}'; only 'committed' or 'approved' executions can be pushed.",
+        )
+
+    if not execution.commit_hash:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Execution {execution_id} has no commit_hash; cannot push.",
+        )
+
+    # Determine branch: prefer execution.branch_name, then look in development_sessions
+    branch = getattr(execution, "branch_name", None)
+    if not branch:
+        with db_mgr.get_cursor() as cursor:
+            # Find the development session whose commit_hash matches
+            cursor.execute(
+                "SELECT branch_name FROM development_sessions WHERE commit_hash = ? ORDER BY id DESC LIMIT 1",
+                (execution.commit_hash,),
+            )
+            row = cursor.fetchone()
+            if row:
+                branch = row["branch_name"]
+
+    if not branch:
+        # Fallback: try to find branch containing the commit via git
+        repo = db_mgr.get_repository(execution.repository_id)
+        if repo and Path(repo.repository_path).exists():
+            ec, out, _ = safe_subprocess_run(
+                ["git", "branch", "--contains", execution.commit_hash],
+                cwd=Path(repo.repository_path),
+                timeout=10.0,
+            )
+            if ec == 0 and out.strip():
+                # Take the first branch line (strip leading * and spaces)
+                branch = out.strip().splitlines()[0].lstrip("* ").strip()
+
+    if not branch:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Could not determine branch for execution {execution_id} (commit {execution.commit_hash[:7]}).",
+        )
+
+    try:
+        result = sync_engine.push_repository(
+            repository_id=execution.repository_id,
+            branch=branch,
+            execution_id=execution_id,
+            commit_hash=execution.commit_hash,
+        )
+    except PermissionDeniedError as e:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=str(e))
+    except ValueError as e:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e))
+
+    if not result.get("success") and not result.get("pushed") is False:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=result.get("error", "Push failed"))
+
+    return {**result, "execution_id": execution_id, "branch": branch}
+
+
+@phase4_router.get("/commits/{execution_id}/sync-status", summary="Get push_sync_status for a specific execution")
+def get_execution_sync_status(execution_id: int, db_mgr: DatabaseManager = Depends(get_db)):
+    with db_mgr.get_cursor() as cursor:
+        cursor.execute(
+            "SELECT id, status, commit_hash, push_sync_status, branch_name FROM execution_history WHERE id = ?",
+            (execution_id,),
+        )
+        row = cursor.fetchone()
+    if not row:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Execution {execution_id} not found.")
+    d = dict(row)
+    return {
+        "execution_id": d["id"],
+        "status": d["status"],
+        "commit_hash": d["commit_hash"],
+        "push_sync_status": d.get("push_sync_status", "LOCAL_ONLY"),
+        "branch_name": d.get("branch_name"),
+    }
+
+
+@phase4_router.post(
+    "/github/sync/push-branch/{repository_id}",
+    summary="Push a specific named branch to origin (for autonomous dev session branches)",
+)
+def push_named_branch(
+    repository_id: int,
+    body: Optional[Dict[str, Any]] = None,
+    branch: Optional[str] = Query(default=None),
+    sync_engine: GitHubSyncEngine = Depends(get_sync_engine),
+):
+    """
+    Push a specific branch to origin.
+    Branch can be specified via:
+    - Query parameter: ?branch=autogit/dev-...
+    - JSON body: {"branch": "autogit/dev-..."}
+    """
+    target_branch = branch
+    if not target_branch and body:
+        target_branch = body.get("branch")
+
+    if not target_branch:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Branch name is required. Pass via query param ?branch=... or JSON body {\"branch\": \"...\"}",
+        )
+
+    try:
+        result = sync_engine.push_repository(repository_id=repository_id, branch=target_branch)
+    except PermissionDeniedError as e:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=str(e))
+    except ValueError as e:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e))
+
+    if not result.get("success") and result.get("pushed") is not False:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=result.get("error", "Push failed"))
+
+    return result

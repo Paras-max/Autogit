@@ -10,10 +10,15 @@ import {
   ExternalLink,
   AlertTriangle,
   Play,
+  Download,
+  FolderPlus,
+  Github,
+  Loader2,
 } from 'lucide-react';
 import { Repository, RepositoryPermissions } from '../types';
 import {
   addRepository,
+  importGitHubRepository,
   removeRepository,
   getRepositoryPermissions,
   updateRepositoryPermissions,
@@ -31,10 +36,22 @@ export const RepositoriesPage: React.FC<RepositoriesPageProps> = ({
   repositories,
   onRefresh,
 }) => {
-  const [newPath, setNewPath] = useState('');
-  const [newName, setNewName] = useState('');
-  const [adding, setAdding] = useState(false);
-  const [addError, setAddError] = useState<string | null>(null);
+  // Mode selection: 'none' | 'local' | 'github'
+  const [addMode, setAddMode] = useState<'none' | 'local' | 'github'>('none');
+
+  // Option A: Add Local Repo
+  const [localPath, setLocalPath] = useState('');
+  const [localName, setLocalName] = useState('');
+  const [addingLocal, setAddingLocal] = useState(false);
+  const [localError, setLocalError] = useState<string | null>(null);
+
+  // Option B: Import from GitHub
+  const [githubUrl, setGithubUrl] = useState('');
+  const [destFolder, setDestFolder] = useState('');
+  const [githubName, setGithubName] = useState('');
+  const [cloning, setCloning] = useState(false);
+  const [githubError, setGithubError] = useState<string | null>(null);
+  const [githubSuccess, setGithubSuccess] = useState<string | null>(null);
 
   // Selected repo for permissions detail
   const [selectedRepo, setSelectedRepo] = useState<Repository | null>(null);
@@ -69,20 +86,48 @@ export const RepositoriesPage: React.FC<RepositoriesPageProps> = ({
     }
   };
 
-  const handleAddRepo = async (e: React.FormEvent) => {
+  const handleAddLocalRepo = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!newPath.trim()) return;
-    setAdding(true);
-    setAddError(null);
+    if (!localPath.trim()) return;
+    setAddingLocal(true);
+    setLocalError(null);
     try {
-      await addRepository(newPath.trim(), newName.trim() || undefined);
-      setNewPath('');
-      setNewName('');
+      await addRepository(localPath.trim(), localName.trim() || undefined);
+      setLocalPath('');
+      setLocalName('');
+      setAddMode('none');
       onRefresh();
     } catch (err: any) {
-      setAddError(err.message || 'Failed to register repository');
+      setLocalError(err.message || 'Failed to register local repository');
     } finally {
-      setAdding(false);
+      setAddingLocal(false);
+    }
+  };
+
+  const handleImportGitHub = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!githubUrl.trim() || !destFolder.trim()) return;
+    setCloning(true);
+    setGithubError(null);
+    setGithubSuccess(null);
+    try {
+      const res = await importGitHubRepository(
+        githubUrl.trim(),
+        destFolder.trim(),
+        githubName.trim() || undefined
+      );
+      setGithubSuccess(`Successfully cloned and registered ${res.repository_name || res.name}!`);
+      setGithubUrl('');
+      setGithubName('');
+      setTimeout(() => {
+        setAddMode('none');
+        setGithubSuccess(null);
+      }, 2000);
+      onRefresh();
+    } catch (err: any) {
+      setGithubError(err.message || 'Failed to import repository from GitHub');
+    } finally {
+      setCloning(false);
     }
   };
 
@@ -90,7 +135,7 @@ export const RepositoriesPage: React.FC<RepositoriesPageProps> = ({
     setConfirmModal({
       isOpen: true,
       title: 'Remove Repository Registration?',
-      message: `Are you sure you want to remove '${repo.repository_name}' from AutoGit AI? Local files and Git commit history will remain completely untouched.`,
+      message: `Are you sure you want to remove '${repo.repository_name || repo.name}' from AutoGit AI? Local files and Git commit history will remain completely untouched.`,
       onConfirm: async () => {
         try {
           await removeRepository(repo.id);
@@ -126,7 +171,7 @@ export const RepositoriesPage: React.FC<RepositoriesPageProps> = ({
       setConfirmModal({
         isOpen: true,
         title: `Enable Dangerous Permission: ${String(key).replace(/_/g, ' ').toUpperCase()}`,
-        message: `Enabling ${key} allows AutoGit AI to perform active actions on '${selectedRepo.repository_name}'. Ensure you want to authorize this operation.`,
+        message: `Enabling ${key} allows AutoGit AI to perform active actions on '${selectedRepo.repository_name || selectedRepo.name}'. Ensure you want to authorize this operation.`,
         onConfirm: executeToggle,
       });
     } else {
@@ -151,51 +196,190 @@ export const RepositoriesPage: React.FC<RepositoriesPageProps> = ({
 
   return (
     <div className="space-y-6">
-      {/* Header & Add Repository */}
-      <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 bg-slate-900 border border-slate-800 p-6 rounded-2xl">
-        <div>
-          <h1 className="text-xl font-bold text-white tracking-tight flex items-center space-x-2">
-            <FolderGit2 className="w-5 h-5 text-blue-400" />
-            <span>Repository Management & Permissions</span>
-          </h1>
-          <p className="text-xs text-slate-400 mt-1">
-            Register local repositories and configure granular permissions. Unauthorized repositories are strictly barred.
-          </p>
+      {/* Header & Registration Selection */}
+      <div className="bg-slate-900 border border-slate-800 p-6 rounded-2xl space-y-4">
+        <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
+          <div>
+            <h1 className="text-xl font-bold text-white tracking-tight flex items-center space-x-2">
+              <FolderGit2 className="w-5 h-5 text-blue-400" />
+              <span>Repository Management & Permissions</span>
+            </h1>
+            <p className="text-xs text-slate-400 mt-1">
+              Register existing local repositories or import and clone repositories directly from GitHub.
+            </p>
+          </div>
+
+          <div className="flex items-center space-x-3 shrink-0">
+            <button
+              onClick={() => {
+                setAddMode(addMode === 'local' ? 'none' : 'local');
+                setLocalError(null);
+              }}
+              className={`px-4 py-2 rounded-xl text-xs font-semibold flex items-center space-x-1.5 transition-all shadow-md ${
+                addMode === 'local'
+                  ? 'bg-blue-600 text-white shadow-blue-600/30 ring-2 ring-blue-400'
+                  : 'bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700'
+              }`}
+            >
+              <FolderPlus className="w-4 h-4 text-blue-400" />
+              <span>Add Local Repo</span>
+            </button>
+
+            <button
+              onClick={() => {
+                setAddMode(addMode === 'github' ? 'none' : 'github');
+                setGithubError(null);
+                setGithubSuccess(null);
+              }}
+              className={`px-4 py-2 rounded-xl text-xs font-semibold flex items-center space-x-1.5 transition-all shadow-md ${
+                addMode === 'github'
+                  ? 'bg-purple-600 text-white shadow-purple-600/30 ring-2 ring-purple-400'
+                  : 'bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700'
+              }`}
+            >
+              <Github className="w-4 h-4 text-purple-400" />
+              <span>Import from GitHub</span>
+            </button>
+          </div>
         </div>
 
-        {/* Add Repo Form */}
-        <form onSubmit={handleAddRepo} className="flex flex-col sm:flex-row items-center gap-2">
-          <input
-            type="text"
-            placeholder="Local repo path (e.g. C:/Projects/repo)"
-            value={newPath}
-            onChange={(e) => setNewPath(e.target.value)}
-            className="px-3 py-2 bg-slate-800 border border-slate-700 rounded-xl text-xs text-white placeholder-slate-500 focus:outline-none focus:border-blue-500 w-full sm:w-64"
-          />
-          <input
-            type="text"
-            placeholder="Optional name"
-            value={newName}
-            onChange={(e) => setNewName(e.target.value)}
-            className="px-3 py-2 bg-slate-800 border border-slate-700 rounded-xl text-xs text-white placeholder-slate-500 focus:outline-none focus:border-blue-500 w-full sm:w-32"
-          />
-          <button
-            type="submit"
-            disabled={adding}
-            className="w-full sm:w-auto px-4 py-2 bg-blue-600 hover:bg-blue-500 text-white rounded-xl text-xs font-semibold flex items-center justify-center space-x-1.5 transition-all shadow-md shadow-blue-600/30 shrink-0"
-          >
-            <Plus className="w-4 h-4" />
-            <span>{adding ? 'Adding...' : 'Add Repo'}</span>
-          </button>
-        </form>
+        {/* Panel A: Add Local Repository */}
+        {addMode === 'local' && (
+          <div className="mt-4 pt-4 border-t border-slate-800 bg-slate-950/40 p-4 rounded-xl border">
+            <div className="flex items-center justify-between mb-3">
+              <span className="text-xs font-bold text-blue-300 uppercase tracking-wider flex items-center space-x-1.5">
+                <FolderPlus className="w-4 h-4" />
+                <span>Option A: Add Existing Local Git Repository</span>
+              </span>
+              <button
+                type="button"
+                onClick={() => setAddMode('none')}
+                className="text-xs text-slate-500 hover:text-slate-300"
+              >
+                Cancel
+              </button>
+            </div>
+            <form onSubmit={handleAddLocalRepo} className="flex flex-col sm:flex-row items-center gap-3">
+              <input
+                type="text"
+                placeholder="Absolute local directory path (e.g. C:\Users\name\Desktop\Project)"
+                value={localPath}
+                onChange={(e) => setLocalPath(e.target.value)}
+                className="px-3.5 py-2.5 bg-slate-800 border border-slate-700 rounded-xl text-xs text-white placeholder-slate-500 focus:outline-none focus:border-blue-500 flex-1 w-full"
+              />
+              <input
+                type="text"
+                placeholder="Optional display name"
+                value={localName}
+                onChange={(e) => setLocalName(e.target.value)}
+                className="px-3.5 py-2.5 bg-slate-800 border border-slate-700 rounded-xl text-xs text-white placeholder-slate-500 focus:outline-none focus:border-blue-500 w-full sm:w-48"
+              />
+              <button
+                type="submit"
+                disabled={addingLocal}
+                className="w-full sm:w-auto px-5 py-2.5 bg-blue-600 hover:bg-blue-500 text-white rounded-xl text-xs font-semibold flex items-center justify-center space-x-1.5 transition-all shadow-md shadow-blue-600/30 shrink-0"
+              >
+                {addingLocal ? <Loader2 className="w-4 h-4 animate-spin" /> : <Plus className="w-4 h-4" />}
+                <span>{addingLocal ? 'Registering...' : 'Register Local'}</span>
+              </button>
+            </form>
+            {localError && (
+              <div className="mt-3 p-3 bg-red-950/60 border border-red-800 rounded-xl text-xs text-red-300 flex items-center space-x-2">
+                <AlertTriangle className="w-4 h-4 shrink-0 text-red-400" />
+                <span>{localError}</span>
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* Panel B: Import from GitHub */}
+        {addMode === 'github' && (
+          <div className="mt-4 pt-4 border-t border-slate-800 bg-slate-950/40 p-4 rounded-xl border">
+            <div className="flex items-center justify-between mb-3">
+              <span className="text-xs font-bold text-purple-300 uppercase tracking-wider flex items-center space-x-1.5">
+                <Github className="w-4 h-4" />
+                <span>Option B: Import & Clone from GitHub</span>
+              </span>
+              <button
+                type="button"
+                onClick={() => setAddMode('none')}
+                className="text-xs text-slate-500 hover:text-slate-300"
+              >
+                Cancel
+              </button>
+            </div>
+            <form onSubmit={handleImportGitHub} className="space-y-3">
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                <div>
+                  <label className="block text-[11px] font-medium text-slate-400 mb-1">
+                    GitHub Repository URL (HTTPS or SSH)
+                  </label>
+                  <input
+                    type="text"
+                    placeholder="https://github.com/Paras-max/PollingApp.git"
+                    value={githubUrl}
+                    onChange={(e) => setGithubUrl(e.target.value)}
+                    className="w-full px-3.5 py-2 bg-slate-800 border border-slate-700 rounded-xl text-xs text-white placeholder-slate-500 focus:outline-none focus:border-purple-500 font-mono"
+                  />
+                </div>
+                <div>
+                  <label className="block text-[11px] font-medium text-slate-400 mb-1">
+                    Destination Folder (Folder to clone into)
+                  </label>
+                  <input
+                    type="text"
+                    placeholder="e.g. C:\Users\PARAS\Desktop\GitHubProjects"
+                    value={destFolder}
+                    onChange={(e) => setDestFolder(e.target.value)}
+                    className="w-full px-3.5 py-2 bg-slate-800 border border-slate-700 rounded-xl text-xs text-white placeholder-slate-500 focus:outline-none focus:border-purple-500 font-mono"
+                  />
+                </div>
+              </div>
+
+              <div className="flex flex-col sm:flex-row items-center justify-between gap-3 pt-1">
+                <input
+                  type="text"
+                  placeholder="Optional custom display name"
+                  value={githubName}
+                  onChange={(e) => setGithubName(e.target.value)}
+                  className="px-3.5 py-2 bg-slate-800 border border-slate-700 rounded-xl text-xs text-white placeholder-slate-500 focus:outline-none focus:border-purple-500 w-full sm:w-64"
+                />
+                <button
+                  type="submit"
+                  disabled={cloning || !githubUrl.trim() || !destFolder.trim()}
+                  className="w-full sm:w-auto px-6 py-2.5 bg-purple-600 hover:bg-purple-500 disabled:opacity-50 text-white rounded-xl text-xs font-semibold flex items-center justify-center space-x-2 transition-all shadow-md shadow-purple-600/30 shrink-0"
+                >
+                  {cloning ? (
+                    <>
+                      <Loader2 className="w-4 h-4 animate-spin" />
+                      <span>Cloning Repository (please wait)...</span>
+                    </>
+                  ) : (
+                    <>
+                      <Download className="w-4 h-4" />
+                      <span>Clone & Register Repository</span>
+                    </>
+                  )}
+                </button>
+              </div>
+            </form>
+
+            {githubError && (
+              <div className="mt-3 p-3 bg-red-950/60 border border-red-800 rounded-xl text-xs text-red-300 flex items-center space-x-2">
+                <AlertTriangle className="w-4 h-4 shrink-0 text-red-400" />
+                <span>{githubError}</span>
+              </div>
+            )}
+
+            {githubSuccess && (
+              <div className="mt-3 p-3 bg-emerald-950/60 border border-emerald-800 rounded-xl text-xs text-emerald-300 flex items-center space-x-2">
+                <CheckCircle2 className="w-4 h-4 shrink-0 text-emerald-400" />
+                <span>{githubSuccess}</span>
+              </div>
+            )}
+          </div>
+        )}
       </div>
-
-      {addError && (
-        <div className="p-3 bg-red-950/60 border border-red-800 rounded-xl text-xs text-red-300 flex items-center space-x-2">
-          <AlertTriangle className="w-4 h-4 shrink-0" />
-          <span>{addError}</span>
-        </div>
-      )}
 
       {/* Main Repositories Grid */}
       <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
@@ -208,7 +392,7 @@ export const RepositoriesPage: React.FC<RepositoriesPageProps> = ({
           <div className="flex-1 overflow-y-auto py-2 space-y-2">
             {repositories.length === 0 ? (
               <div className="py-12 text-center text-xs text-slate-500">
-                No repositories registered yet. Add one above.
+                No repositories registered yet. Add a local repo or import from GitHub above.
               </div>
             ) : (
               repositories.map((repo) => {
@@ -225,7 +409,7 @@ export const RepositoriesPage: React.FC<RepositoriesPageProps> = ({
                   >
                     <div className="flex items-center justify-between">
                       <span className="font-semibold text-sm text-white truncate">
-                        {repo.repository_name}
+                        {repo.repository_name || repo.name}
                       </span>
                       <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-slate-800 text-slate-300 border border-slate-700">
                         ID: {repo.id}
@@ -235,8 +419,8 @@ export const RepositoriesPage: React.FC<RepositoriesPageProps> = ({
                       <GitBranch className="w-3.5 h-3.5 text-blue-400 shrink-0" />
                       <span>{repo.current_branch || 'main'}</span>
                     </div>
-                    <p className="text-[11px] text-slate-500 mt-1 truncate" title={repo.repository_path}>
-                      {repo.repository_path}
+                    <p className="text-[11px] text-slate-500 mt-1 truncate" title={repo.repository_path || repo.path}>
+                      {repo.repository_path || repo.path}
                     </p>
                   </div>
                 );
@@ -253,9 +437,9 @@ export const RepositoriesPage: React.FC<RepositoriesPageProps> = ({
               <div className="flex items-center justify-between pb-4 border-b border-slate-800">
                 <div>
                   <h2 className="text-lg font-bold text-white flex items-center space-x-2">
-                    <span>{selectedRepo.repository_name}</span>
+                    <span>{selectedRepo.repository_name || selectedRepo.name}</span>
                   </h2>
-                  <p className="text-xs font-mono text-slate-400 mt-1">{selectedRepo.repository_path}</p>
+                  <p className="text-xs font-mono text-slate-400 mt-1">{selectedRepo.repository_path || selectedRepo.path}</p>
                 </div>
                 <button
                   onClick={() => handleRemoveRepo(selectedRepo)}

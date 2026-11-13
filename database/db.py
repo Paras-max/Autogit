@@ -283,10 +283,31 @@ CREATE TABLE IF NOT EXISTS dashboard_preferences (
     updated_at TEXT DEFAULT (datetime('now'))
 );
 
+CREATE TABLE IF NOT EXISTS pull_requests (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    repository_id INTEGER NOT NULL,
+    pr_number INTEGER NOT NULL,
+    title TEXT NOT NULL,
+    source_branch TEXT NOT NULL,
+    target_branch TEXT NOT NULL,
+    state TEXT NOT NULL DEFAULT 'open',
+    html_url TEXT NOT NULL,
+    is_merged INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT DEFAULT (datetime('now')),
+    updated_at TEXT DEFAULT (datetime('now')),
+    merged_at TEXT,
+    body TEXT,
+    diff_url TEXT,
+    FOREIGN KEY (repository_id) REFERENCES repositories(id) ON DELETE CASCADE,
+    UNIQUE (repository_id, pr_number)
+);
+
 CREATE INDEX IF NOT EXISTS idx_sync_hist_repo ON github_sync_history(repository_id);
 CREATE INDEX IF NOT EXISTS idx_remote_status_repo ON remote_repository_status(repository_id);
 CREATE INDEX IF NOT EXISTS idx_notifications_read ON notifications(is_read);
 CREATE INDEX IF NOT EXISTS idx_notifications_time ON notifications(created_at);
+CREATE INDEX IF NOT EXISTS idx_pull_requests_repo ON pull_requests(repository_id);
+CREATE INDEX IF NOT EXISTS idx_pull_requests_state ON pull_requests(state);
 """
 
 
@@ -326,11 +347,15 @@ class DatabaseManager:
         is_mem = str(self.db_path) == ":memory:"
         conn = self._get_connection()
         cursor = conn.cursor()
+        if not conn.in_transaction:
+            conn.execute("BEGIN")
         try:
             yield cursor
-            conn.commit()
+            if conn.in_transaction:
+                conn.commit()
         except Exception as e:
-            conn.rollback()
+            if conn.in_transaction:
+                conn.rollback()
             logger.error(f"Database transaction error: {e}")
             raise
         finally:
@@ -344,8 +369,74 @@ class DatabaseManager:
             with self.get_cursor() as cursor:
                 cursor.executescript(SCHEMA_SQL)
             logger.debug(f"Database initialized at {self.db_path}")
+            self._run_migrations()
         except Exception as e:
             logger.error(f"Failed to initialize database: {e}")
+            raise
+
+    def _run_migrations(self) -> None:
+        """
+        Run safe, additive schema migrations inside an explicit transaction.
+        Preserves all historical records, foreign keys, and indexes.
+        """
+        try:
+            with self.get_cursor() as cursor:
+                # 1. execution_history columns
+                cursor.execute("PRAGMA table_info(execution_history)")
+                existing_cols = {row["name"] for row in cursor.fetchall()}
+
+                new_columns = [
+                    ("push_sync_status", "TEXT DEFAULT 'UNKNOWN'"),
+                    ("branch_name", "TEXT"),
+                    ("local_commit_hash", "TEXT"),
+                    ("remote_commit_hash", "TEXT"),
+                    ("remote_advanced", "INTEGER NOT NULL DEFAULT 0"),
+                    ("verification_status", "TEXT"),
+                    ("source_branch", "TEXT"),
+                    ("target_branch", "TEXT"),
+                    ("remote_name", "TEXT"),
+                    ("push_timestamp", "TEXT"),
+                    ("push_error", "TEXT"),
+                ]
+
+                for col_name, col_type in new_columns:
+                    if col_name not in existing_cols:
+                        cursor.execute(
+                            f"ALTER TABLE execution_history ADD COLUMN {col_name} {col_type}"
+                        )
+                        logger.info(f"Migration: added {col_name} to execution_history")
+
+                # 2. pull_requests table (no hardcoded target_branch default)
+                cursor.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS pull_requests (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        repository_id INTEGER NOT NULL,
+                        pr_number INTEGER NOT NULL,
+                        title TEXT NOT NULL,
+                        source_branch TEXT NOT NULL,
+                        target_branch TEXT NOT NULL,
+                        state TEXT NOT NULL DEFAULT 'open',
+                        html_url TEXT NOT NULL,
+                        is_merged INTEGER NOT NULL DEFAULT 0,
+                        created_at TEXT DEFAULT (datetime('now')),
+                        updated_at TEXT DEFAULT (datetime('now')),
+                        merged_at TEXT,
+                        body TEXT,
+                        diff_url TEXT,
+                        FOREIGN KEY (repository_id) REFERENCES repositories(id) ON DELETE CASCADE,
+                        UNIQUE (repository_id, pr_number)
+                    )
+                    """
+                )
+                cursor.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_pull_requests_repo ON pull_requests(repository_id)"
+                )
+                cursor.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_pull_requests_state ON pull_requests(state)"
+                )
+        except Exception as e:
+            logger.error(f"Migration error: {e}")
             raise
 
     # =========================================================================

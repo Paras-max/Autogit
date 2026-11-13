@@ -18,8 +18,18 @@ def validate_local_path(path_str: str) -> Tuple[bool, Optional[str], Optional[Pa
     if not path_str or not path_str.strip():
         return False, "Path cannot be empty", None
 
+    # Detect GitHub/remote URLs early — they cannot be local filesystem paths
+    stripped = path_str.strip()
+    if stripped.startswith(("http://", "https://", "git@", "git://", "ssh://")):
+        return (
+            False,
+            "GitHub URLs cannot be used as local paths. "
+            "Use the 'Import from GitHub' feature to clone a remote repository.",
+            None,
+        )
+
     try:
-        resolved = Path(path_str).resolve()
+        resolved = Path(stripped).resolve()
         if not resolved.exists():
             return False, f"Path does not exist: {resolved}", None
         if not resolved.is_dir():

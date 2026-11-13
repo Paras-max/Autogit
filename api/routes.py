@@ -2,6 +2,9 @@
 FastAPI route handlers for AutoGit AI.
 """
 
+import dataclasses
+import urllib.parse
+from pathlib import Path
 from typing import List, Optional
 from fastapi import APIRouter, Depends, HTTPException, status
 
@@ -9,6 +12,7 @@ from api.schemas import (
     AIProviderSelectRequest,
     FileEventResponse,
     GenericMessageResponse,
+    GitHubImportRequest,
     GitHubValidateRequest,
     GitHubValidateResponse,
     GitBranchesResponse,
@@ -25,6 +29,7 @@ from api.schemas import (
 from core.authentication import AuthenticationService
 from core.credential_manager import CredentialManager
 from core.git_manager import GitManager
+from core.permission_manager import PermissionManager
 from core.repository_manager import RepositoryManager
 from database.db import DatabaseManager, db
 from monitoring.file_monitor import FileMonitor, file_monitor
@@ -69,10 +74,20 @@ def get_monitor() -> FileMonitor:
 def create_repository(
     payload: RepositoryCreateRequest,
     repo_mgr: RepositoryManager = Depends(get_repo_manager),
+    database: DatabaseManager = Depends(get_db),
 ):
     try:
         repo = repo_mgr.add_repository(payload.path, payload.name)
         info = repo_mgr.get_repository_info(repo.id)  # type: ignore
+        if info:
+            info["name"] = info["repository_name"]
+            info["path"] = info["repository_path"]
+            info["repo_id"] = info["id"]
+            try:
+                p = PermissionManager(database).get_permissions(repo.id)
+                info["permissions"] = dataclasses.asdict(p)
+            except Exception:
+                info["permissions"] = None
         return info
     except ValueError as e:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
@@ -88,8 +103,178 @@ def create_repository(
     response_model=List[RepositorySummaryResponse],
     summary="List all registered repositories",
 )
-def list_repositories(repo_mgr: RepositoryManager = Depends(get_repo_manager)):
-    return repo_mgr.list_repositories()
+def list_repositories(
+    repo_mgr: RepositoryManager = Depends(get_repo_manager),
+    database: DatabaseManager = Depends(get_db),
+):
+    repos = repo_mgr.list_repositories()
+    perm_mgr = PermissionManager(database)
+    output = []
+    for r in repos:
+        try:
+            p = perm_mgr.get_permissions(r.id)
+            perms_dict = dataclasses.asdict(p)
+        except Exception:
+            perms_dict = None
+        output.append(
+            RepositorySummaryResponse(
+                id=r.id,
+                repository_name=r.repository_name,
+                repository_path=r.repository_path,
+                remote_url=r.remote_url,
+                current_branch=r.current_branch,
+                created_at=r.created_at,
+                name=r.repository_name,
+                path=r.repository_path,
+                repo_id=r.id,
+                permissions=perms_dict,
+            )
+        )
+    return output
+
+
+@api_router.post(
+    "/repositories/import-github",
+    response_model=RepositoryResponse,
+    status_code=status.HTTP_201_CREATED,
+    summary="Clone a GitHub repository and register it locally",
+)
+def import_github_repository(
+    payload: GitHubImportRequest,
+    repo_mgr: RepositoryManager = Depends(get_repo_manager),
+    database: DatabaseManager = Depends(get_db),
+):
+    """
+    Clones a GitHub repository to a local destination folder and registers it.
+    Never exposes the GitHub token in logs or responses.
+    Never overwrites existing directories with unrelated content.
+    Never triggers a push during import.
+    """
+    from config.settings import settings as app_settings
+    from utils.validators import mask_secret
+    import git  # GitPython
+
+    github_url = payload.github_url.strip()
+    destination_folder = payload.destination_folder.strip()
+
+    # --- Validate GitHub URL ---
+    parsed = urllib.parse.urlparse(github_url)
+    is_https = parsed.scheme in ("http", "https") and (
+        parsed.netloc in ("github.com", "www.github.com")
+    )
+    is_ssh = github_url.startswith("git@github.com:")
+    if not (is_https or is_ssh):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=(
+                f"Invalid GitHub URL: '{github_url}'. "
+                "Provide an HTTPS URL (https://github.com/owner/repo) "
+                "or SSH URL (git@github.com:owner/repo.git)."
+            ),
+        )
+
+    # --- Extract repo name from URL ---
+    url_path = parsed.path if is_https else github_url.split(":", 1)[-1]
+    repo_slug = url_path.rstrip("/").rstrip(".git").rsplit("/", 1)[-1]
+    if not repo_slug:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Could not extract repository name from the GitHub URL.",
+        )
+
+    # --- Validate & build destination path ---
+    dest_folder = Path(destination_folder)
+    if not dest_folder.is_absolute():
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Destination folder must be an absolute path: '{destination_folder}'",
+        )
+
+    dest_path = dest_folder / repo_slug
+
+    # If destination already exists:
+    if dest_path.exists():
+        # Allow if it's already a git repo (just re-register)
+        if (dest_path / ".git").exists():
+            logger.info(f"Destination already contains a Git repo: {dest_path}. Registering.")
+        else:
+            contents = list(dest_path.iterdir())
+            if contents:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=(
+                        f"Destination already exists and is not empty: {dest_path}. "
+                        "Choose a different destination folder or an empty directory."
+                    ),
+                )
+        # Empty dir or git repo — fall through to clone / re-register
+
+    repo_name = payload.name.strip() if payload.name and payload.name.strip() else repo_slug
+
+    # --- Clone (only if not already a git repo at dest) ---
+    if not (dest_path / ".git").exists():
+        # Build authenticated clone URL (token only for HTTPS)
+        token = app_settings.GITHUB_TOKEN
+        if is_https and token:
+            # Inject token into URL — never log the raw token
+            safe_github_url = f"https://{urllib.parse.quote(token, safe='')}@github.com{parsed.path}"
+            log_url = f"https://***@github.com{parsed.path}"
+        else:
+            safe_github_url = github_url
+            log_url = github_url
+
+        logger.info(f"Cloning {log_url} → {dest_path}")
+        try:
+            git.Repo.clone_from(safe_github_url, str(dest_path))
+        except git.exc.GitCommandError as exc:
+            # Strip any token from error messages before surfacing them
+            err_msg = str(exc)
+            if token:
+                err_msg = err_msg.replace(token, mask_secret(token) or "***")
+            logger.error(f"Clone failed for {log_url}: {err_msg}")
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail=f"Clone failed: {err_msg}",
+            )
+        except Exception as exc:
+            err_msg = str(exc)
+            if token:
+                err_msg = err_msg.replace(token, mask_secret(token) or "***")
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"Unexpected clone error: {err_msg}",
+            )
+
+        if not (dest_path / ".git").exists():
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="Clone appeared to succeed but no .git directory was created.",
+            )
+        logger.info(f"Clone succeeded: {dest_path}")
+
+    # --- Register the cloned repo ---
+    try:
+        repo = repo_mgr.add_repository(str(dest_path), repo_name)
+        info = repo_mgr.get_repository_info(repo.id)  # type: ignore
+        if info:
+            info["name"] = info["repository_name"]
+            info["path"] = info["repository_path"]
+            info["repo_id"] = info["id"]
+            try:
+                from core.permission_manager import PermissionManager
+                p = PermissionManager(database).get_permissions(repo.id)
+                info["permissions"] = dataclasses.asdict(p)
+            except Exception:
+                info["permissions"] = None
+        return info
+    except ValueError as e:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+    except Exception as e:
+        logger.error(f"Failed to register cloned repository: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Registration failed after clone: {e}",
+        )
 
 
 @api_router.get(
@@ -97,13 +282,25 @@ def list_repositories(repo_mgr: RepositoryManager = Depends(get_repo_manager)):
     response_model=RepositoryResponse,
     summary="Get repository details by ID",
 )
-def get_repository(repo_id: int, repo_mgr: RepositoryManager = Depends(get_repo_manager)):
+def get_repository(
+    repo_id: int,
+    repo_mgr: RepositoryManager = Depends(get_repo_manager),
+    database: DatabaseManager = Depends(get_db),
+):
     info = repo_mgr.get_repository_info(repo_id)
     if not info:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Repository with ID {repo_id} not found",
         )
+    info["name"] = info["repository_name"]
+    info["path"] = info["repository_path"]
+    info["repo_id"] = info["id"]
+    try:
+        p = PermissionManager(database).get_permissions(repo_id)
+        info["permissions"] = dataclasses.asdict(p)
+    except Exception:
+        info["permissions"] = None
     return info
 
 
