@@ -62,8 +62,17 @@ export interface CommitRecord {
   repository_name?: string;
   github_commit_url?: string | null;
   // Push sync state machine
-  push_sync_status?: 'LOCAL_ONLY' | 'PENDING_APPROVAL' | 'READY_TO_PUSH' | 'PUSHING' | 'PUSHED' | 'PUSH_FAILED' | 'REMOTE_CONFLICT';
+  push_sync_status?: 'LOCAL_ONLY' | 'PENDING_APPROVAL' | 'READY_TO_PUSH' | 'PUSHING' | 'PUSHED' | 'PUSH_FAILED' | 'REMOTE_CONFLICT' | 'VERIFICATION_FAILED' | 'UNKNOWN';
   execution_id?: number | null;
+  source_branch?: string | null;
+  target_branch?: string | null;
+  remote_name?: string | null;
+  verification_status?: string | null;
+  remote_advanced?: boolean;
+  local_commit_hash?: string | null;
+  remote_commit_hash?: string | null;
+  push_timestamp?: string | null;
+  push_error?: string | null;
 }
 
 // Legacy alias kept for compatibility

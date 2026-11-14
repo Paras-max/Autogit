@@ -120,6 +120,10 @@ def _apply_restrictive_permissions(dir_path: Path, file_path: Path) -> None:
     """
     Apply restrictive permissions so only the current user/process can access
     the temporary helper directory and file.
+    On POSIX: sets mode 0700.
+    On Windows: uses icacls to disable inheritance, grant exclusive Full Control
+    to the current user and NT AUTHORITY\\SYSTEM, and remove BUILTIN\\Administrators
+    and all unrelated user access.
     """
     if sys.platform != "win32":
         try:
@@ -128,10 +132,49 @@ def _apply_restrictive_permissions(dir_path: Path, file_path: Path) -> None:
         except Exception as e:
             logger.debug(f"Failed to set POSIX permissions: {e}")
     else:
-        # On Windows, temp folders created by tempfile under user profile AppData/Local/Temp
-        # already inherit ACL restricted to the current user and SYSTEM.
-        # We additionally ensure DACL inheritance is preserved.
-        pass
+        try:
+            user = os.environ.get("USERNAME")
+            domain = os.environ.get("USERDOMAIN")
+            user_account = f"{domain}\\{user}" if domain and user else (user or "")
+
+            if user_account:
+                # 1. Directory ACL: disable inheritance, grant current user and SYSTEM Full Control
+                subprocess.run(
+                    ["icacls", str(dir_path), "/inheritance:r"],
+                    capture_output=True, check=False
+                )
+                subprocess.run(
+                    ["icacls", str(dir_path), "/grant:r", f"{user_account}:(OI)(CI)(F)"],
+                    capture_output=True, check=False
+                )
+                subprocess.run(
+                    ["icacls", str(dir_path), "/grant:r", "NT AUTHORITY\\SYSTEM:(OI)(CI)(F)"],
+                    capture_output=True, check=False
+                )
+                subprocess.run(
+                    ["icacls", str(dir_path), "/remove:g", "BUILTIN\\Administrators"],
+                    capture_output=True, check=False
+                )
+
+                # 2. File ACL: disable inheritance, grant current user and SYSTEM Full Control
+                subprocess.run(
+                    ["icacls", str(file_path), "/inheritance:r"],
+                    capture_output=True, check=False
+                )
+                subprocess.run(
+                    ["icacls", str(file_path), "/grant:r", f"{user_account}:(F)"],
+                    capture_output=True, check=False
+                )
+                subprocess.run(
+                    ["icacls", str(file_path), "/grant:r", "NT AUTHORITY\\SYSTEM:(F)"],
+                    capture_output=True, check=False
+                )
+                subprocess.run(
+                    ["icacls", str(file_path), "/remove:g", "BUILTIN\\Administrators"],
+                    capture_output=True, check=False
+                )
+        except Exception as e:
+            logger.debug(f"Failed to set Windows ACL: {e}")
 
 
 def _create_posix_helper(helper_path: Path, token_env_var: str, user_env_var: str) -> None:
@@ -157,11 +200,62 @@ def _create_posix_helper(helper_path: Path, token_env_var: str, user_env_var: st
     helper_path.write_text(content, encoding="utf-8")
 
 
-def _create_windows_helper(helper_path: Path, token_env_var: str, user_env_var: str) -> None:
+def _get_or_compile_windows_helper(helper_path: Path) -> bool:
     """
-    Create a Windows batch file helper that discriminates between Username and
-    Password prompts using batch string inspection.
-    Never contains raw credentials; reads strictly from process environment.
+    Provide a native Windows executable helper (.exe) that evaluates Git prompts
+    directly inside the process without cmd.exe or shell metacharacter evaluation.
+    Tries precompiled utils/askpass.exe first, then csc.exe compilation.
+    Returns True if askpass.exe was created successfully.
+    """
+    import shutil
+    built_in_exe = Path(__file__).parent / "askpass.exe"
+    if built_in_exe.is_file():
+        try:
+            shutil.copyfile(built_in_exe, helper_path)
+            return True
+        except Exception as e:
+            logger.debug(f"Could not copy precompiled askpass.exe: {e}")
+
+    # Fallback to compiling askpass.cs with csc.exe if present
+    cs_file = Path(__file__).parent / "askpass.cs"
+    if cs_file.is_file():
+        csc_candidates = [
+            r"C:\Windows\Microsoft.NET\Framework64\v4.0.30319\csc.exe",
+            r"C:\Windows\Microsoft.NET\Framework\v4.0.30319\csc.exe",
+            shutil.which("csc.exe"),
+        ]
+        for csc in csc_candidates:
+            if csc and Path(csc).is_file():
+                try:
+                    res = subprocess.run(
+                        [
+                            csc,
+                            "/nologo",
+                            "/optimize",
+                            "/target:exe",
+                            f"/out:{str(helper_path)}",
+                            str(cs_file),
+                        ],
+                        capture_output=True,
+                        text=True,
+                        check=False,
+                    )
+                    if res.returncode == 0 and helper_path.is_file():
+                        # Also cache at built_in_exe for subsequent calls
+                        try:
+                            shutil.copyfile(helper_path, built_in_exe)
+                        except Exception:
+                            pass
+                        return True
+                except Exception as e:
+                    logger.debug(f"csc compilation failed: {e}")
+
+    return False
+
+
+def _create_windows_bat_fallback(helper_path: Path, token_env_var: str, user_env_var: str) -> None:
+    """
+    Fallback Windows batch helper when .exe is unavailable.
     """
     content = (
         "@echo off\r\n"
@@ -220,17 +314,21 @@ def git_credential_context(
     except Exception:
         pass
 
-    helper_ext = ".bat" if is_windows else ".sh"
-    helper_path = temp_dir / f"askpass{helper_ext}"
-
     # Process-scoped randomized variable names
     token_var_name = f"AUTOGIT_ASKPASS_TOKEN_{unique_suffix}"
     user_var_name = f"AUTOGIT_ASKPASS_USER_{unique_suffix}"
+    helper_path: Optional[Path] = None
 
     try:
         if is_windows:
-            _create_windows_helper(helper_path, token_var_name, user_var_name)
+            exe_helper = temp_dir / "askpass.exe"
+            if _get_or_compile_windows_helper(exe_helper):
+                helper_path = exe_helper
+            else:
+                helper_path = temp_dir / "askpass.bat"
+                _create_windows_bat_fallback(helper_path, token_var_name, user_var_name)
         else:
+            helper_path = temp_dir / "askpass.sh"
             _create_posix_helper(helper_path, token_var_name, user_var_name)
 
         _apply_restrictive_permissions(temp_dir, helper_path)
@@ -245,9 +343,9 @@ def git_credential_context(
         yield env_updates
 
     finally:
-        # Guaranteed cleanup: delete helper script, pid file, and directory
+        # Guaranteed cleanup: delete helper binary/script, pid file, and directory
         try:
-            if helper_path.exists():
+            if helper_path and helper_path.exists():
                 helper_path.unlink(missing_ok=True)
             pid_file = temp_dir / "owner.pid"
             if pid_file.exists():

@@ -115,6 +115,35 @@ const pushExecutionCommit = (executionId: string | number) =>
 const getExecutionSyncStatus = (executionId: string | number) =>
   fetchJSON<any>(`${API_BASE}/commits/${executionId}/sync-status`);
 
+const pushCommit = (data: {
+  repository_id: number;
+  execution_id?: number;
+  commit_id?: number;
+  commit_hash?: string;
+  remote_name?: string;
+  target_branch?: string;
+  branch?: string;
+}) =>
+  fetchJSON<any>(`${API_BASE}/github/push`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(data),
+  });
+
+const getCommitSyncStatus = (repoId: string | number) =>
+  fetchJSON<any>(`${API_BASE}/github/sync-status/${repoId}`);
+
+const getPendingSyncCommits = (repoId: string | number, limit = 50) =>
+  fetchJSON<any[]>(`${API_BASE}/github/pending/${repoId}?limit=${limit}`);
+
+const getPushAuditHistory = (repoId: string | number, limit = 20) =>
+  fetchJSON<any[]>(`${API_BASE}/github/push-history/${repoId}?limit=${limit}`);
+
+const retryPush = (executionId: string | number, remoteName = 'origin') =>
+  fetchJSON<any>(`${API_BASE}/github/retry/${executionId}?remote_name=${encodeURIComponent(remoteName)}`, {
+    method: 'POST',
+  });
+
 // Legacy aliases kept for compatibility
 const fetchRemote = fetchRepository;
 const pushRemote = pushRepository;
@@ -258,6 +287,11 @@ export const api = {
   pushBranch,
   pushExecutionCommit,
   getExecutionSyncStatus,
+  pushCommit,
+  getCommitSyncStatus,
+  getPendingSyncCommits,
+  getPushAuditHistory,
+  retryPush,
   fetchRemote,
   pushRemote,
   getSyncHistory,

@@ -105,6 +105,8 @@ class ExecutionRepository:
         repository_id: int,
         execution_mode: str = "smart",
         status: str = "pending",
+        commit_hash: Optional[str] = None,
+        commit_message: Optional[str] = None,
         proposal_data: Optional[Dict[str, Any]] = None,
     ) -> ExecutionHistoryModel:
         now = get_utc_now_iso()
@@ -113,10 +115,12 @@ class ExecutionRepository:
             cursor.execute(
                 """
                 INSERT INTO execution_history
-                    (repository_id, execution_mode, status, created_at, proposal_data)
-                VALUES (?, ?, ?, ?, ?)
+                    (repository_id, execution_mode, status, created_at, proposal_data,
+                     commit_hash, commit_message)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
                 """,
-                (repository_id, execution_mode, status, now, proposal_str),
+                (repository_id, execution_mode, status, now, proposal_str,
+                 commit_hash, commit_message),
             )
             exec_id = cursor.lastrowid
         return ExecutionHistoryModel(
@@ -124,8 +128,8 @@ class ExecutionRepository:
             repository_id=repository_id,
             execution_mode=execution_mode,
             status=status,
-            commit_hash=None,
-            commit_message=None,
+            commit_hash=commit_hash,
+            commit_message=commit_message,
             created_at=now,
             proposal_data=proposal_str,
         )
@@ -190,6 +194,80 @@ class ExecutionRepository:
                 ),
             )
         return self.get_execution(execution_id)
+
+    def update_sync_status(
+        self,
+        execution_id: int,
+        push_sync_status: str,
+        verification_status: Optional[str] = None,
+        local_commit_hash: Optional[str] = None,
+        remote_commit_hash: Optional[str] = None,
+        remote_advanced: Optional[bool] = None,
+        source_branch: Optional[str] = None,
+        target_branch: Optional[str] = None,
+        remote_name: Optional[str] = None,
+        push_timestamp: Optional[str] = None,
+        push_error: Optional[str] = None,
+        branch_name: Optional[str] = None,
+    ) -> Optional[ExecutionHistoryModel]:
+        """Update GitHub push synchronization fields for an execution record."""
+        fields = ["push_sync_status = ?"]
+        params = [push_sync_status]
+
+        if verification_status is not None:
+            fields.append("verification_status = ?")
+            params.append(verification_status)
+        if local_commit_hash is not None:
+            fields.append("local_commit_hash = ?")
+            params.append(local_commit_hash)
+        if remote_commit_hash is not None:
+            fields.append("remote_commit_hash = ?")
+            params.append(remote_commit_hash)
+        if remote_advanced is not None:
+            fields.append("remote_advanced = ?")
+            params.append(1 if remote_advanced else 0)
+        if source_branch is not None:
+            fields.append("source_branch = ?")
+            params.append(source_branch)
+        if target_branch is not None:
+            fields.append("target_branch = ?")
+            params.append(target_branch)
+        if branch_name is not None:
+            fields.append("branch_name = ?")
+            params.append(branch_name)
+        if remote_name is not None:
+            fields.append("remote_name = ?")
+            params.append(remote_name)
+        if push_timestamp is not None:
+            fields.append("push_timestamp = ?")
+            params.append(push_timestamp)
+        if push_error is not None:
+            fields.append("push_error = ?")
+            params.append(push_error)
+
+        params.append(execution_id)
+        sql = f"UPDATE execution_history SET {', '.join(fields)} WHERE id = ?"
+
+        with self.db.get_cursor() as cursor:
+            cursor.execute(sql, tuple(params))
+        return self.get_execution(execution_id)
+
+    def list_pending_sync_commits(self, repository_id: int, limit: int = 50) -> List[ExecutionHistoryModel]:
+        """List execution records that are committed locally but not verified on remote."""
+        with self.db.get_cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT * FROM execution_history
+                WHERE repository_id = ?
+                  AND status = 'committed'
+                  AND (push_sync_status IS NULL OR push_sync_status != 'PUSHED')
+                ORDER BY id DESC
+                LIMIT ?
+                """,
+                (repository_id, limit),
+            )
+            rows = cursor.fetchall()
+            return [ExecutionHistoryModel(**dict(r)) for r in rows]
 
     def get_active_proposal(self, repository_id: int) -> Optional[ExecutionHistoryModel]:
         """Find the latest execution still awaiting approval or pending execution."""

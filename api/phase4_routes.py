@@ -21,6 +21,7 @@ from api.schemas import (
     DashboardActivityItem,
     DashboardOverviewResponse,
     GenericMessageResponse,
+    GitHubPushRequest,
     GitHubSyncHistoryResponse,
     NotificationResponse,
     RemoteStatusResponse,
@@ -82,6 +83,106 @@ def get_health_monitor(db_mgr: DatabaseManager = Depends(get_db)) -> HealthMonit
 # ============================================================================
 # 1. GitHub Account & Synchronization Endpoints
 # ============================================================================
+
+@phase4_router.post(
+    "/github/push",
+    response_model=SyncOperationResponse,
+    summary="Push an authorized commit or branch to remote with verification",
+)
+def push_commit_endpoint(
+    req: GitHubPushRequest,
+    sync_engine: GitHubSyncEngine = Depends(get_sync_engine),
+):
+    """
+    Step 3: Secure push endpoint.
+    Derives and validates the actual local commit and source branch.
+    Never assumes main branch for autonomous development commits.
+    Enforces repository-level remote_push permission.
+    Verifies remote commit reachable before returning success.
+    """
+    exec_id = req.execution_id or req.commit_id
+    try:
+        res = sync_engine.push_repository(
+            repository_id=req.repository_id,
+            execution_id=exec_id,
+            commit_hash=req.commit_hash,
+            branch=req.branch,
+            remote_name=req.remote_name or "origin",
+            target_branch=req.target_branch,
+        )
+        if not res.get("success") and not res.get("pushed"):
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=res.get("error", "Push failed"))
+        return SyncOperationResponse(**res)
+    except PermissionDeniedError as e:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=str(e))
+    except ValueError as e:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+
+
+@phase4_router.get(
+    "/github/sync-status/{repo_id}",
+    summary="Get detailed commit synchronization and verification status",
+)
+def get_commit_sync_status(
+    repo_id: int,
+    sync_engine: GitHubSyncEngine = Depends(get_sync_engine),
+):
+    try:
+        return sync_engine.get_sync_status(repo_id)
+    except ValueError as e:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e))
+
+
+@phase4_router.get(
+    "/github/pending/{repo_id}",
+    summary="List local commits pending synchronization to remote",
+)
+def get_pending_sync_commits(
+    repo_id: int,
+    limit: int = 50,
+    sync_engine: GitHubSyncEngine = Depends(get_sync_engine),
+):
+    try:
+        return sync_engine.get_pending_commits(repo_id, limit=limit)
+    except ValueError as e:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e))
+
+
+@phase4_router.get(
+    "/github/push-history/{repo_id}",
+    summary="Get push attempt audit history",
+)
+def get_push_audit_history(
+    repo_id: int,
+    limit: int = 20,
+    sync_engine: GitHubSyncEngine = Depends(get_sync_engine),
+):
+    try:
+        return sync_engine.get_push_history(repo_id, limit=limit)
+    except ValueError as e:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e))
+
+
+@phase4_router.post(
+    "/github/retry/{execution_id}",
+    response_model=SyncOperationResponse,
+    summary="Retry a failed or pending push for an execution record",
+)
+def retry_failed_push(
+    execution_id: int,
+    remote_name: str = "origin",
+    sync_engine: GitHubSyncEngine = Depends(get_sync_engine),
+):
+    try:
+        res = sync_engine.retry_push(execution_id, remote_name=remote_name)
+        if not res.get("success"):
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=res.get("error", "Retry push failed"))
+        return SyncOperationResponse(**res)
+    except PermissionDeniedError as e:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=str(e))
+    except ValueError as e:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+
 
 @phase4_router.get("/github/account", summary="Get authenticated GitHub account info and rate limit")
 async def get_github_account(client: GitHubClient = Depends(get_github_client)):
@@ -714,79 +815,31 @@ def push_execution_commit(
     Push the branch that contains the given execution's commit to origin.
     Steps:
     1. Load execution record from DB.
-    2. Verify status=committed and commit_hash is set.
-    3. Determine branch from execution record or development_sessions.
-    4. Update push_sync_status to PUSHING.
-    5. Call sync_engine.push_repository with that branch.
-    6. Return result.
+    2. Enforce remote_push permission.
+    3. Determine and validate branch from execution record or development_sessions.
+    4. Execute secure push via GIT_ASKPASS credential handler.
+    5. Verify remote commit reachable via merge-base.
+    6. Return verified result.
     """
-    import json as _json
-
     exec_repo = ExecutionRepository(db_mgr)
     execution = exec_repo.get_execution(execution_id)
     if not execution:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Execution {execution_id} not found.")
 
-    if execution.status not in ("committed", "approved"):
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Execution {execution_id} has status='{execution.status}'; only 'committed' or 'approved' executions can be pushed.",
-        )
-
-    if not execution.commit_hash:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Execution {execution_id} has no commit_hash; cannot push.",
-        )
-
-    # Determine branch: prefer execution.branch_name, then look in development_sessions
-    branch = getattr(execution, "branch_name", None)
-    if not branch:
-        with db_mgr.get_cursor() as cursor:
-            # Find the development session whose commit_hash matches
-            cursor.execute(
-                "SELECT branch_name FROM development_sessions WHERE commit_hash = ? ORDER BY id DESC LIMIT 1",
-                (execution.commit_hash,),
-            )
-            row = cursor.fetchone()
-            if row:
-                branch = row["branch_name"]
-
-    if not branch:
-        # Fallback: try to find branch containing the commit via git
-        repo = db_mgr.get_repository(execution.repository_id)
-        if repo and Path(repo.repository_path).exists():
-            ec, out, _ = safe_subprocess_run(
-                ["git", "branch", "--contains", execution.commit_hash],
-                cwd=Path(repo.repository_path),
-                timeout=10.0,
-            )
-            if ec == 0 and out.strip():
-                # Take the first branch line (strip leading * and spaces)
-                branch = out.strip().splitlines()[0].lstrip("* ").strip()
-
-    if not branch:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Could not determine branch for execution {execution_id} (commit {execution.commit_hash[:7]}).",
-        )
-
     try:
         result = sync_engine.push_repository(
             repository_id=execution.repository_id,
-            branch=branch,
             execution_id=execution_id,
-            commit_hash=execution.commit_hash,
         )
     except PermissionDeniedError as e:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=str(e))
     except ValueError as e:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e))
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
 
-    if not result.get("success") and not result.get("pushed") is False:
+    if not result.get("success") and result.get("pushed") is not False:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=result.get("error", "Push failed"))
 
-    return {**result, "execution_id": execution_id, "branch": branch}
+    return {**result, "execution_id": execution_id}
 
 
 @phase4_router.get("/commits/{execution_id}/sync-status", summary="Get push_sync_status for a specific execution")

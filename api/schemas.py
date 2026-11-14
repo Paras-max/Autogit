@@ -310,14 +310,35 @@ class SyncOperationResponse(BaseModel):
     success: bool
     operation: str
     branch: Optional[str] = None
+    target_branch: Optional[str] = None
     remote: Optional[str] = None
     commit_hash: Optional[str] = None
+    local_commit_hash: Optional[str] = None
+    remote_commit_hash: Optional[str] = None
     ahead_count: Optional[int] = None
     behind_count: Optional[int] = None
     sync_status: Optional[str] = None
+    push_sync_status: Optional[str] = None
+    verification_status: Optional[str] = None
+    remote_verified: Optional[bool] = None
+    remote_advanced: Optional[bool] = None
+    execution_id: Optional[int] = None
+    last_push_at: Optional[str] = None
+    pushed: Optional[bool] = None
+    message: Optional[str] = None
     error: Optional[str] = None
     conflict: Optional[bool] = False
     conflicting_files: Optional[List[str]] = []
+
+
+class GitHubPushRequest(BaseModel):
+    repository_id: int
+    execution_id: Optional[int] = None
+    commit_id: Optional[int] = None
+    commit_hash: Optional[str] = None
+    remote_name: Optional[str] = "origin"
+    target_branch: Optional[str] = None
+    branch: Optional[str] = None
 
 
 class GitHubSyncHistoryResponse(BaseModel):

@@ -28,13 +28,21 @@ type PushSyncStatus =
   | 'PUSHED'
   | 'PUSH_FAILED'
   | 'REMOTE_CONFLICT'
+  | 'VERIFICATION_FAILED'
+  | 'UNKNOWN'
   | undefined;
 
-const SyncBadge: React.FC<{ syncStatus: PushSyncStatus }> = ({ syncStatus }) => {
+const SyncBadge: React.FC<{ syncStatus: PushSyncStatus; verificationStatus?: string | null }> = ({
+  syncStatus,
+  verificationStatus,
+}) => {
   switch (syncStatus) {
     case 'PUSHED':
       return (
-        <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium bg-emerald-100 text-emerald-700 dark:bg-emerald-900/40 dark:text-emerald-400">
+        <span
+          className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium bg-emerald-100 text-emerald-700 dark:bg-emerald-900/40 dark:text-emerald-400"
+          title={verificationStatus ? `Verified: ${verificationStatus}` : 'Verified on remote'}
+        >
           <CheckCircle2 className="w-3 h-3" /> Pushed
         </span>
       );
@@ -46,8 +54,20 @@ const SyncBadge: React.FC<{ syncStatus: PushSyncStatus }> = ({ syncStatus }) => 
       );
     case 'PUSH_FAILED':
       return (
-        <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium bg-red-100 text-red-700 dark:bg-red-900/40 dark:text-red-400">
+        <span
+          className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium bg-red-100 text-red-700 dark:bg-red-900/40 dark:text-red-400"
+          title={verificationStatus ? `Error: ${verificationStatus}` : 'Push failed'}
+        >
           <AlertCircle className="w-3 h-3" /> Push Failed
+        </span>
+      );
+    case 'VERIFICATION_FAILED':
+      return (
+        <span
+          className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium bg-rose-100 text-rose-700 dark:bg-rose-900/40 dark:text-rose-400"
+          title="Push command returned success but remote commit could not be verified"
+        >
+          <AlertCircle className="w-3 h-3" /> Verify Failed
         </span>
       );
     case 'PENDING_APPROVAL':
@@ -66,6 +86,12 @@ const SyncBadge: React.FC<{ syncStatus: PushSyncStatus }> = ({ syncStatus }) => 
       return (
         <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium bg-blue-100 text-blue-700 dark:bg-blue-900/40 dark:text-blue-400">
           <Cloud className="w-3 h-3" /> Ready
+        </span>
+      );
+    case 'UNKNOWN':
+      return (
+        <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium bg-slate-100 text-slate-500 dark:bg-slate-800 dark:text-slate-400">
+          <CloudOff className="w-3 h-3" /> Unverified
         </span>
       );
     case 'LOCAL_ONLY':
@@ -91,6 +117,7 @@ export const CommitHistoryPage: React.FC = () => {
   const [pushingId, setPushingId] = useState<string | null>(null); // commit_hash being pushed
   const [pushError, setPushError] = useState<string | null>(null);
   const [syncStatus, setSyncStatus] = useState<Record<string | number, any>>({});
+  const [confirmPushCommit, setConfirmPushCommit] = useState<CommitRecord | null>(null);
 
   const loadData = useCallback(async () => {
     setLoading(true);
@@ -188,18 +215,25 @@ export const CommitHistoryPage: React.FC = () => {
   const handlePush = async (commit: CommitRecord) => {
     const hash = commit.commit_hash || '';
     const repoId = commit.repository_id;
-    const branch = commit.branch;
     setPushingId(hash);
     setPushError(null);
 
     try {
-      // If we have an execution_id, use the dedicated commit push endpoint
       if (commit.execution_id && repoId) {
-        await api.pushExecutionCommit(commit.execution_id);
-      } else if (repoId && branch) {
-        await api.pushRepository(repoId, branch);
+        await api.pushCommit({
+          repository_id: repoId,
+          execution_id: commit.execution_id,
+          commit_hash: commit.commit_hash || undefined,
+          branch: commit.branch || undefined,
+          target_branch: commit.target_branch || undefined,
+          remote_name: commit.remote_name || 'origin',
+        });
       } else if (repoId) {
-        await api.pushRepository(repoId);
+        await api.pushCommit({
+          repository_id: repoId,
+          branch: commit.branch || undefined,
+          remote_name: commit.remote_name || 'origin',
+        });
       } else {
         throw new Error('Not enough information to push this commit.');
       }
@@ -220,7 +254,7 @@ export const CommitHistoryPage: React.FC = () => {
 
   const isPushable = (commit: CommitRecord) => {
     const st = commit.push_sync_status;
-    return st === 'LOCAL_ONLY' || st === 'PUSH_FAILED' || st === 'READY_TO_PUSH' || st == null;
+    return st === 'LOCAL_ONLY' || st === 'PUSH_FAILED' || st === 'READY_TO_PUSH' || st === 'VERIFICATION_FAILED' || st === 'UNKNOWN' || st == null;
   };
 
   // Build a summary of sync status for selected repos
@@ -419,9 +453,9 @@ export const CommitHistoryPage: React.FC = () => {
                           {/* Push button */}
                           {pushable && (
                             <button
-                              onClick={() => handlePush(c)}
+                              onClick={() => setConfirmPushCommit(c)}
                               disabled={isPushing}
-                              className="inline-flex items-center gap-1.5 text-xs font-medium px-2.5 py-1.5 rounded bg-emerald-600 hover:bg-emerald-700 text-white disabled:opacity-60 disabled:cursor-not-allowed"
+                              className="inline-flex items-center gap-1.5 text-xs font-medium px-2.5 py-1.5 rounded bg-emerald-600 hover:bg-emerald-700 text-white disabled:opacity-60 disabled:cursor-not-allowed shadow-sm"
                               title="Push to GitHub"
                             >
                               {isPushing ? (
@@ -449,6 +483,75 @@ export const CommitHistoryPage: React.FC = () => {
           </div>
         )}
       </div>
+
+      {/* Push Confirmation Modal */}
+      {confirmPushCommit && (
+        <div className="fixed inset-0 z-50 bg-slate-900/60 backdrop-blur-sm flex items-center justify-center p-4">
+          <div className="bg-white dark:bg-slate-800 rounded-xl shadow-2xl max-w-lg w-full p-6 border border-slate-200 dark:border-slate-700">
+            <div className="flex items-center justify-between pb-4 border-b border-slate-200 dark:border-slate-700">
+              <h3 className="text-lg font-bold text-slate-900 dark:text-white flex items-center gap-2">
+                <Upload className="w-5 h-5 text-emerald-500" />
+                Confirm GitHub Push
+              </h3>
+              <button
+                onClick={() => setConfirmPushCommit(null)}
+                className="text-slate-400 hover:text-slate-600 dark:hover:text-slate-200"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+            <div className="mt-4 space-y-3 text-sm">
+              <p className="text-slate-600 dark:text-slate-300">
+                Are you sure you want to push this commit to the remote repository?
+              </p>
+              <div className="bg-slate-50 dark:bg-slate-900/50 p-4 rounded-lg space-y-2 border border-slate-200 dark:border-slate-700 font-mono text-xs">
+                <div>
+                  <span className="text-slate-500 dark:text-slate-400 font-sans font-semibold">Repository:</span>{' '}
+                  <span className="text-slate-900 dark:text-slate-100 font-bold">{confirmPushCommit.repo_name || confirmPushCommit.repository_name || 'N/A'}</span>
+                </div>
+                <div>
+                  <span className="text-slate-500 dark:text-slate-400 font-sans font-semibold">Source Branch:</span>{' '}
+                  <span className="text-emerald-600 dark:text-emerald-400 font-bold">{confirmPushCommit.source_branch || confirmPushCommit.branch || 'main'}</span>
+                </div>
+                <div>
+                  <span className="text-slate-500 dark:text-slate-400 font-sans font-semibold">Remote Name:</span>{' '}
+                  <span className="text-slate-700 dark:text-slate-300">{confirmPushCommit.remote_name || 'origin'}</span>
+                </div>
+                <div>
+                  <span className="text-slate-500 dark:text-slate-400 font-sans font-semibold">Target Branch:</span>{' '}
+                  <span className="text-emerald-600 dark:text-emerald-400 font-bold">{confirmPushCommit.target_branch || confirmPushCommit.source_branch || confirmPushCommit.branch || 'main'}</span>
+                </div>
+                <div>
+                  <span className="text-slate-500 dark:text-slate-400 font-sans font-semibold">Commit Hash:</span>{' '}
+                  <span className="text-primary-600 dark:text-primary-400">{confirmPushCommit.commit_hash || 'HEAD'}</span>
+                </div>
+              </div>
+              <p className="text-xs text-slate-500 italic">
+                AutoGit AI will securely push using temporary credentials and verify that the commit is reachable on the remote branch before marking as pushed.
+              </p>
+            </div>
+            <div className="mt-6 flex justify-end gap-3">
+              <button
+                onClick={() => setConfirmPushCommit(null)}
+                className="px-4 py-2 text-sm font-medium text-slate-700 dark:text-slate-300 bg-slate-100 dark:bg-slate-700 hover:bg-slate-200 rounded-lg"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={() => {
+                  const target = confirmPushCommit;
+                  setConfirmPushCommit(null);
+                  handlePush(target);
+                }}
+                className="px-4 py-2 text-sm font-medium text-white bg-emerald-600 hover:bg-emerald-700 rounded-lg shadow-sm flex items-center gap-2"
+              >
+                <Upload className="w-4 h-4" />
+                Confirm & Push
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Slide-over details modal */}
       {selectedCommit && (
