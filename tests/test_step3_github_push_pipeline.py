@@ -241,6 +241,140 @@ class TestBranchSelectionAndIsolation:
                 commit_hash=x_commit,
             )
 
+    def test_push_only_selected_dev_branch_when_multiple_dev_branches_exist(self, tmp_path):
+        """
+        Step 3 Final Safety Check:
+        When multiple autogit/dev-* branches exist locally, pushing a selected dev branch
+        must push ONLY that exact branch via fully-qualified refspec.
+        The second dev branch must NOT be pushed.
+        The main branch must NOT be modified.
+        """
+        local_repo, bare_remote = _create_test_repo_with_bare_remote(tmp_path)
+        db_file = tmp_path / "test_b_multi.db"
+        db = DatabaseManager(db_file)
+        repo_model = db.add_repository("TestRepoMulti", str(local_repo), remote_url=str(bare_remote))
+        perm_mgr = PermissionManager(db)
+        perm_mgr.update_permissions(repo_model.id, remote_push_enabled=True)
+
+        exec_repo = ExecutionRepository(db)
+        engine = GitHubSyncEngine(database=db, permission_mgr=perm_mgr, exec_repo=exec_repo)
+
+        # Record initial remote main tip
+        remote_main_before = subprocess.run(
+            ["git", "rev-parse", "refs/heads/main"],
+            cwd=bare_remote, check=True, capture_output=True, text=True
+        ).stdout.strip()
+
+        # Branch 1: autogit/dev-20261114-100000
+        dev_branch_1 = "autogit/dev-20261114-100000"
+        subprocess.run(["git", "checkout", "-b", dev_branch_1], cwd=local_repo, check=True)
+        (local_repo / "task1.py").write_text("# Task 1\n", encoding="utf-8")
+        subprocess.run(["git", "add", "task1.py"], cwd=local_repo, check=True)
+        subprocess.run(["git", "commit", "-m", "feat: task 1 implementation"], cwd=local_repo, check=True)
+        commit_1 = subprocess.run(
+            ["git", "rev-parse", "HEAD"], cwd=local_repo, check=True, capture_output=True, text=True
+        ).stdout.strip()
+
+        # Branch 2: autogit/dev-20261114-200000 (created from main, completely independent)
+        dev_branch_2 = "autogit/dev-20261114-200000"
+        subprocess.run(["git", "checkout", "main"], cwd=local_repo, check=True)
+        subprocess.run(["git", "checkout", "-b", dev_branch_2], cwd=local_repo, check=True)
+        (local_repo / "task2.py").write_text("# Task 2\n", encoding="utf-8")
+        subprocess.run(["git", "add", "task2.py"], cwd=local_repo, check=True)
+        subprocess.run(["git", "commit", "-m", "feat: task 2 implementation"], cwd=local_repo, check=True)
+        commit_2 = subprocess.run(
+            ["git", "rev-parse", "HEAD"], cwd=local_repo, check=True, capture_output=True, text=True
+        ).stdout.strip()
+
+        # Switch local checkout back to main
+        subprocess.run(["git", "checkout", "main"], cwd=local_repo, check=True)
+
+        # Create uncommitted and staged modifications on local working tree
+        (local_repo / "uncommitted.txt").write_text("uncommitted work", encoding="utf-8")
+        (local_repo / "staged.txt").write_text("staged work", encoding="utf-8")
+        subprocess.run(["git", "add", "staged.txt"], cwd=local_repo, check=True)
+
+        # Push only branch 1
+        res = engine.push_repository(
+            repository_id=repo_model.id,
+            branch=dev_branch_1,
+            commit_hash=commit_1,
+        )
+
+        assert res["success"] is True
+        assert res["push_sync_status"] == "PUSHED"
+        assert res["verification_status"] == "EXACT_MATCH"
+
+        # Verify actual remote refs on bare remote
+        show_refs = subprocess.run(
+            ["git", "show-ref"], cwd=bare_remote, check=True, capture_output=True, text=True
+        ).stdout
+
+        # 1. Branch 1 MUST exist remotely with exact commit_1
+        assert f"refs/heads/{dev_branch_1}" in show_refs
+        remote_dev1_tip = subprocess.run(
+            ["git", "rev-parse", f"refs/heads/{dev_branch_1}"],
+            cwd=bare_remote, check=True, capture_output=True, text=True
+        ).stdout.strip()
+        assert remote_dev1_tip == commit_1
+
+        # 2. Branch 2 MUST NOT exist remotely at all!
+        assert f"refs/heads/{dev_branch_2}" not in show_refs
+
+        # 3. Remote main MUST NOT be modified!
+        remote_main_after = subprocess.run(
+            ["git", "rev-parse", "refs/heads/main"],
+            cwd=bare_remote, check=True, capture_output=True, text=True
+        ).stdout.strip()
+        assert remote_main_after == remote_main_before
+        assert remote_main_after != commit_1
+        assert remote_main_after != commit_2
+
+        # 4. Local working tree and staging area MUST remain untouched
+        assert (local_repo / "uncommitted.txt").read_text(encoding="utf-8") == "uncommitted work"
+        staged_status = subprocess.run(
+            ["git", "diff", "--cached", "--name-only"],
+            cwd=local_repo, check=True, capture_output=True, text=True
+        ).stdout.strip()
+        assert staged_status == "staged.txt"
+
+    def test_push_rejects_wildcard_and_malformed_branch_names(self, tmp_path):
+        """
+        Verify that wildcard refspecs (*, ?), glob patterns, shell injection characters,
+        and invalid Git refnames are strictly rejected.
+        """
+        local_repo, bare_remote = _create_test_repo_with_bare_remote(tmp_path)
+        db_file = tmp_path / "test_b_reject.db"
+        db = DatabaseManager(db_file)
+        repo_model = db.add_repository("TestRepoReject", str(local_repo), remote_url=str(bare_remote))
+        perm_mgr = PermissionManager(db)
+        perm_mgr.update_permissions(repo_model.id, remote_push_enabled=True)
+
+        engine = GitHubSyncEngine(database=db, permission_mgr=perm_mgr)
+
+        malformed_branches = [
+            "autogit/dev-*",
+            "refs/heads/*",
+            "dev-?",
+            "branch[0-9]",
+            "dev;rm -rf /",
+            "dev|cat /etc/passwd",
+            "-invalid-dash",
+            "branch..double-dot",
+            "branch@{upstream}",
+            "/leading-slash",
+            "trailing-slash/",
+            "branch with spaces",
+            "dev.lock",
+        ]
+
+        for bad_branch in malformed_branches:
+            with pytest.raises(ValueError, match="Invalid or unsafe branch name"):
+                engine.push_repository(
+                    repository_id=repo_model.id,
+                    branch=bad_branch,
+                )
+
 
 # ============================================================================
 # Group C: Remote Commit Verification (Ancestry & Advanced Checks)

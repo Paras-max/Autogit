@@ -81,13 +81,31 @@ class GitHubSyncEngine:
         return clean
 
     def _validate_ref_name(self, ref: str) -> bool:
-        """Validate that a branch or ref name is safe and contains no control characters or shell metacharacters."""
+        """
+        Validate that a branch or ref name is safe, valid, and contains no wildcards,
+        control characters, or shell metacharacters.
+        Rejects glob wildcards (*, ?), pattern brackets, and invalid Git ref syntax.
+        """
         if not ref or len(ref) > 250:
             return False
-        # Disallow control chars, spaces, shell injection chars
-        if any(c in ref for c in [' ', '\t', '\r', '\n', ';', '&', '|', '>', '<', '`', '$', '(', ')', '\\', '^', '~', ':', '?']):
+        # Disallow wildcards (*, ?), bracket expressions, control chars, spaces, shell injection chars
+        disallowed = [
+            ' ', '\t', '\r', '\n', ';', '&', '|', '>', '<', '`', '$',
+            '(', ')', '\\', '^', '~', ':', '?', '*', '[', ']', '{', '}'
+        ]
+        if any(c in ref for c in disallowed):
             return False
-        if ref.startswith("-") or ref.endswith(".lock") or "/." in ref or "//" in ref or ".." in ref:
+        if (
+            ref.startswith("-")
+            or ref.startswith("/")
+            or ref.endswith("/")
+            or ref.endswith(".lock")
+            or "/." in ref
+            or "//" in ref
+            or ".." in ref
+            or "@{" in ref
+            or ref == "@"
+        ):
             return False
         return True
 
@@ -428,9 +446,14 @@ class GitHubSyncEngine:
 
         # 6. EXECUTE GIT PUSH VIA GIT_ASKPASS CREDENTIAL HANDLER
         token = self._get_github_token(token_override)
-        refspec = f"{source_branch}:{remote_target_branch}"
+
+        # Construct exact, fully-qualified refspec without wildcards (never push multiple branches)
+        clean_source = source_branch[11:] if source_branch.startswith("refs/heads/") else source_branch
+        clean_target = remote_target_branch[11:] if remote_target_branch.startswith("refs/heads/") else remote_target_branch
+        refspec = f"refs/heads/{clean_source}:refs/heads/{clean_target}"
+
         logger.info(
-            f"Pushing '{source_branch}' to '{matched_remote}/{remote_target_branch}' "
+            f"Pushing '{source_branch}' to '{matched_remote}/{remote_target_branch}' via exact refspec '{refspec}' "
             f"for repo {repository_id} ({repo.repository_name}) [commit {intended_commit[:8] if intended_commit else 'tip'}]"
         )
 
@@ -526,7 +549,7 @@ class GitHubSyncEngine:
 
             # Fetch the specific remote branch into FETCH_HEAD
             fetch_ec, fetch_out, fetch_err = safe_subprocess_run(
-                ["git", "fetch", matched_remote, f"refs/heads/{remote_target_branch}"],
+                ["git", "fetch", matched_remote, f"refs/heads/{clean_target}"],
                 cwd=repo_path,
                 timeout=30.0,
                 env=cmd_env,
