@@ -146,6 +146,7 @@ CREATE TABLE IF NOT EXISTS repository_permissions (
     smart_commit_enabled INTEGER NOT NULL DEFAULT 1,
     auto_commit_enabled INTEGER NOT NULL DEFAULT 0,
     remote_push_enabled INTEGER NOT NULL DEFAULT 0,
+    pull_request_creation_enabled INTEGER NOT NULL DEFAULT 0,
     updated_at TEXT DEFAULT (datetime('now')),
     FOREIGN KEY (repository_id) REFERENCES repositories(id) ON DELETE CASCADE
 );
@@ -298,6 +299,12 @@ CREATE TABLE IF NOT EXISTS pull_requests (
     merged_at TEXT,
     body TEXT,
     diff_url TEXT,
+    github_pr_id INTEGER,
+    head_commit_sha TEXT,
+    base_commit_sha TEXT,
+    is_draft INTEGER NOT NULL DEFAULT 0,
+    last_synced_at TEXT,
+    last_sync_error TEXT,
     FOREIGN KEY (repository_id) REFERENCES repositories(id) ON DELETE CASCADE,
     UNIQUE (repository_id, pr_number)
 );
@@ -406,7 +413,16 @@ class DatabaseManager:
                         )
                         logger.info(f"Migration: added {col_name} to execution_history")
 
-                # 2. pull_requests table (no hardcoded target_branch default)
+                # 2. repository_permissions columns (Step 4: pull_request_creation_enabled)
+                cursor.execute("PRAGMA table_info(repository_permissions)")
+                existing_perm_cols = {row["name"] for row in cursor.fetchall()}
+                if "pull_request_creation_enabled" not in existing_perm_cols:
+                    cursor.execute(
+                        "ALTER TABLE repository_permissions ADD COLUMN pull_request_creation_enabled INTEGER NOT NULL DEFAULT 0"
+                    )
+                    logger.info("Migration: added pull_request_creation_enabled to repository_permissions")
+
+                # 3. pull_requests table (no hardcoded target_branch default)
                 cursor.execute(
                     """
                     CREATE TABLE IF NOT EXISTS pull_requests (
@@ -424,11 +440,32 @@ class DatabaseManager:
                         merged_at TEXT,
                         body TEXT,
                         diff_url TEXT,
+                        github_pr_id INTEGER,
+                        head_commit_sha TEXT,
+                        base_commit_sha TEXT,
+                        is_draft INTEGER NOT NULL DEFAULT 0,
+                        last_synced_at TEXT,
+                        last_sync_error TEXT,
                         FOREIGN KEY (repository_id) REFERENCES repositories(id) ON DELETE CASCADE,
                         UNIQUE (repository_id, pr_number)
                     )
                     """
                 )
+                cursor.execute("PRAGMA table_info(pull_requests)")
+                existing_pr_cols = {row["name"] for row in cursor.fetchall()}
+                pr_new_columns = [
+                    ("github_pr_id", "INTEGER"),
+                    ("head_commit_sha", "TEXT"),
+                    ("base_commit_sha", "TEXT"),
+                    ("is_draft", "INTEGER NOT NULL DEFAULT 0"),
+                    ("last_synced_at", "TEXT"),
+                    ("last_sync_error", "TEXT"),
+                ]
+                for col_name, col_type in pr_new_columns:
+                    if col_name not in existing_pr_cols:
+                        cursor.execute(f"ALTER TABLE pull_requests ADD COLUMN {col_name} {col_type}")
+                        logger.info(f"Migration: added {col_name} to pull_requests")
+
                 cursor.execute(
                     "CREATE INDEX IF NOT EXISTS idx_pull_requests_repo ON pull_requests(repository_id)"
                 )
@@ -462,8 +499,18 @@ class DatabaseManager:
             repo_id = cursor.lastrowid
             cursor.execute(
                 """
-                INSERT OR IGNORE INTO repository_permissions (repository_id, monitoring_enabled, ai_analysis_enabled, autonomous_development_enabled, smart_commit_enabled, auto_commit_enabled, remote_push_enabled, updated_at)
-                VALUES (?, 1, 1, 0, 1, 0, 0, ?)
+                INSERT OR IGNORE INTO repository_permissions (
+                    repository_id,
+                    monitoring_enabled,
+                    ai_analysis_enabled,
+                    autonomous_development_enabled,
+                    smart_commit_enabled,
+                    auto_commit_enabled,
+                    remote_push_enabled,
+                    pull_request_creation_enabled,
+                    updated_at
+                )
+                VALUES (?, 1, 1, 0, 1, 0, 0, 0, ?)
                 """,
                 (repo_id, now),
             )

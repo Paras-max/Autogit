@@ -22,6 +22,7 @@ export type NavTab =
   | 'agents'
   | 'commits'
   | 'github'
+  | 'pull_requests'
   | 'validation'
   | 'activity'
   | 'notifications'
@@ -49,6 +50,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
     { id: 'agents', label: 'AI Agents', icon: Bot },
     { id: 'commits', label: 'Commit History', icon: GitCommit },
     { id: 'github', label: 'GitHub Sync', icon: Github },
+    { id: 'pull_requests', label: 'Pull Requests', icon: GitPullRequest },
     { id: 'validation', label: 'Validation & Security', icon: ShieldCheck },
     { id: 'activity', label: 'Activity Logs', icon: Activity },
     { id: 'notifications', label: 'Notifications', icon: Bell, badge: unreadCount },

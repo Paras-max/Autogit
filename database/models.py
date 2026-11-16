@@ -125,6 +125,7 @@ class RepositoryPermissionModel:
     smart_commit_enabled: bool = True
     auto_commit_enabled: bool = False  # MUST be False by default
     remote_push_enabled: bool = False  # MUST be False by default
+    pull_request_creation_enabled: bool = False  # MUST be False by default (Phase 4 Step 4)
     updated_at: Optional[str] = None
 
 
@@ -267,7 +268,7 @@ class PullRequestModel:
     title: str
     source_branch: str
     target_branch: str
-    state: str  # 'open', 'closed', 'merged', 'draft'
+    state: str  # 'open', 'closed', 'merged', 'draft', 'review_pending', 'changes_requested'
     html_url: str
     is_merged: bool = False
     created_at: str = ""
@@ -275,5 +276,11 @@ class PullRequestModel:
     merged_at: Optional[str] = None
     body: Optional[str] = None
     diff_url: Optional[str] = None
+    github_pr_id: Optional[int] = None
+    head_commit_sha: Optional[str] = None
+    base_commit_sha: Optional[str] = None
+    is_draft: bool = False
+    last_synced_at: Optional[str] = None
+    last_sync_error: Optional[str] = None
 
 

@@ -28,6 +28,7 @@ export interface RepositoryPermissions {
   auto_commit_enabled?: boolean;
   remote_push?: boolean;
   remote_push_enabled?: boolean;
+  pull_request_creation_enabled?: boolean;
   updated_at?: string | null;
   [key: string]: any;
 }
@@ -254,4 +255,114 @@ export interface PushPreviewResponse {
   additional_commits_count: number;
   additional_commits: AdditionalCommitItem[];
   total_commits_to_push_count: number;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Phase 4 Step 4: Pull Request Types
+// ─────────────────────────────────────────────────────────────────────────────
+
+export interface PullRequestItem {
+  id?: number;
+  repository_id: number;
+  pr_number: number;
+  github_pr_id?: number | null;
+  title: string;
+  body?: string | null;
+  source_branch: string;
+  target_branch: string;
+  state: 'open' | 'closed' | 'merged' | 'draft' | 'review_pending' | 'changes_requested' | string;
+  is_draft: boolean;
+  is_merged: boolean;
+  html_url: string;
+  diff_url?: string | null;
+  head_commit_sha?: string | null;
+  base_commit_sha?: string | null;
+  created_at: string;
+  updated_at: string;
+  merged_at?: string | null;
+  last_synced_at?: string | null;
+  last_sync_error?: string | null;
+}
+
+export interface BranchItem {
+  name: string;
+  is_remote: boolean;
+  is_current: boolean;
+  commit_hash?: string | null;
+  commit_message?: string | null;
+}
+
+export interface RepositoryBranches {
+  repository_id: number;
+  default_branch: string;
+  local_branches: BranchItem[];
+  remote_branches: BranchItem[];
+}
+
+export interface CommitComparisonItem {
+  sha: string;
+  short_sha: string;
+  message: string;
+  author?: string | null;
+  date?: string | null;
+}
+
+export interface FileComparisonItem {
+  filename: string;
+  status: string;
+  additions: number;
+  deletions: number;
+  patch?: string | null;
+}
+
+export interface ValidationCheckItem {
+  name: string;
+  status: 'PASSED' | 'FAILED' | 'WARNING' | 'NOT_CONFIGURED' | 'NOT_RUN' | string;
+  message?: string | null;
+  details?: Record<string, any> | null;
+}
+
+export interface PRValidationSummary {
+  overall_status: 'PASSED' | 'FAILED' | 'WARNING' | string;
+  can_create: boolean;
+  blocking_reasons: string[];
+  checks: ValidationCheckItem[];
+}
+
+export interface PullRequestPrepareResponse {
+  repository_id: number;
+  source_branch: string;
+  target_branch: string;
+  is_pushed: boolean;
+  ahead_count: number;
+  behind_count: number;
+  total_commits: number;
+  commits: CommitComparisonItem[];
+  changed_files_count: number;
+  changed_files: FileComparisonItem[];
+  additions: number;
+  deletions: number;
+  validation: PRValidationSummary;
+  suggested_title: string;
+  suggested_body: string;
+  existing_pr_id?: number | null;
+  existing_pr_number?: number | null;
+  existing_pr_url?: string | null;
+  can_create: boolean;
+  blocking_reasons: string[];
+}
+
+export interface PullRequestCreateRequest {
+  source_branch: string;
+  target_branch: string;
+  title: string;
+  description?: string;
+  is_draft?: boolean;
+}
+
+export interface PullRequestSyncResponse {
+  repository_id: number;
+  synced_count: number;
+  prs: PullRequestItem[];
+  error?: string | null;
 }

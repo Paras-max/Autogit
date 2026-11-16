@@ -149,6 +149,54 @@ const pushCommit = (data: {
 const getCommitSyncStatus = (repoId: string | number) =>
   fetchJSON<any>(`${API_BASE}/github/sync-status/${repoId}`);
 
+// ─── Phase 4 Step 4: Pull Request Automation ──────────────────────────────────
+const getRepositoryBranches = (repoId: string | number) =>
+  fetchJSON<any>(`${API_BASE}/github/repositories/${repoId}/branches`);
+
+const getPullRequests = (repoId: string | number, state?: string) =>
+  fetchJSON<any[]>(
+    `${API_BASE}/github/pull-requests/${repoId}${state ? `?state=${encodeURIComponent(state)}` : ''}`
+  );
+
+const preparePullRequest = (
+  repoId: string | number,
+  data: { source_branch: string; target_branch: string }
+) =>
+  fetchJSON<any>(`${API_BASE}/github/pull-requests/${repoId}/prepare`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(data),
+  });
+
+const createPullRequest = (
+  repoId: string | number,
+  data: {
+    source_branch: string;
+    target_branch: string;
+    title: string;
+    description?: string;
+    is_draft?: boolean;
+  }
+) =>
+  fetchJSON<any>(`${API_BASE}/github/pull-requests/${repoId}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(data),
+  });
+
+const getPullRequestDetail = (repoId: string | number, prNumber: number) =>
+  fetchJSON<any>(`${API_BASE}/github/pull-requests/${repoId}/${prNumber}`);
+
+const refreshPullRequest = (repoId: string | number, prNumber: number) =>
+  fetchJSON<any>(`${API_BASE}/github/pull-requests/${repoId}/${prNumber}/refresh`, {
+    method: 'POST',
+  });
+
+const syncRepositoryPRs = (repoId: string | number) =>
+  fetchJSON<any>(`${API_BASE}/github/pull-requests/${repoId}/sync`, {
+    method: 'POST',
+  });
+
 const getPendingSyncCommits = (repoId: string | number, limit = 50) =>
   fetchJSON<any[]>(`${API_BASE}/github/pending/${repoId}?limit=${limit}`);
 
@@ -312,6 +360,14 @@ export const api = {
   fetchRemote,
   pushRemote,
   getSyncHistory,
+  // Pull Requests (Step 4)
+  getRepositoryBranches,
+  getPullRequests,
+  preparePullRequest,
+  createPullRequest,
+  getPullRequestDetail,
+  refreshPullRequest,
+  syncRepositoryPRs,
   // Scheduler
   getWeeklySchedule,
   generateSchedule,
@@ -361,6 +417,8 @@ export {
   enableDevelopment, disableDevelopment,
   getGitHubAccount, getGitHubRepositories, disconnectGitHub,
   getRemoteStatus, fetchRemote, pushRemote, getSyncHistory,
+  getRepositoryBranches, getPullRequests, preparePullRequest, createPullRequest,
+  getPullRequestDetail, refreshPullRequest, syncRepositoryPRs,
   getWeeklySchedule, generateSchedule, pauseScheduler, resumeScheduler,
   getTasks, addTask, runDevelopmentSession,
   getDashboardOverview, getDashboardActivity, getDashboardAgents,

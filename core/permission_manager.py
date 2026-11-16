@@ -35,6 +35,7 @@ class PermissionManager:
         "smart_commit": "smart_commit_enabled",
         "auto_commit": "auto_commit_enabled",
         "remote_push": "remote_push_enabled",
+        "pull_request_creation": "pull_request_creation_enabled",
     }
 
     def __init__(
@@ -61,6 +62,7 @@ class PermissionManager:
         smart_commit_enabled: Optional[bool] = None,
         auto_commit_enabled: Optional[bool] = None,
         remote_push_enabled: Optional[bool] = None,
+        pull_request_creation_enabled: Optional[bool] = None,
     ) -> RepositoryPermissionModel:
         """Update permissions for a repository."""
         repo = self.db.get_repository(repository_id)
@@ -75,10 +77,11 @@ class PermissionManager:
             smart_commit_enabled=smart_commit_enabled,
             auto_commit_enabled=auto_commit_enabled,
             remote_push_enabled=remote_push_enabled,
+            pull_request_creation_enabled=pull_request_creation_enabled,
         )
         logger.info(
             f"Permissions updated for repository {repository_id} ({repo.repository_name}): "
-            f"dev={updated.autonomous_development_enabled}, auto_commit={updated.auto_commit_enabled}"
+            f"dev={updated.autonomous_development_enabled}, auto_commit={updated.auto_commit_enabled}, pr={updated.pull_request_creation_enabled}"
         )
         return updated
 

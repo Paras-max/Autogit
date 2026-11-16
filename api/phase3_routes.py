@@ -97,6 +97,7 @@ def update_repository_permissions(
             smart_commit_enabled=request.smart_commit_enabled,
             auto_commit_enabled=request.auto_commit_enabled,
             remote_push_enabled=request.remote_push_enabled,
+            pull_request_creation_enabled=request.pull_request_creation_enabled,
         )
         return RepositoryPermissionResponse(**dataclasses.asdict(updated))
     except ValueError as e:

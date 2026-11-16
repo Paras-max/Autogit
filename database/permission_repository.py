@@ -36,6 +36,7 @@ class PermissionRepository:
                     smart_commit_enabled=bool(d["smart_commit_enabled"]),
                     auto_commit_enabled=bool(d["auto_commit_enabled"]),
                     remote_push_enabled=bool(d["remote_push_enabled"]),
+                    pull_request_creation_enabled=bool(d.get("pull_request_creation_enabled", False)),
                     updated_at=d.get("updated_at"),
                 )
 
@@ -48,6 +49,7 @@ class PermissionRepository:
             smart_commit_enabled=True,
             auto_commit_enabled=False,
             remote_push_enabled=False,
+            pull_request_creation_enabled=False,
             updated_at=get_utc_now_iso(),
         )
         return self.save_permissions(default_model)
@@ -66,8 +68,9 @@ class PermissionRepository:
                     smart_commit_enabled,
                     auto_commit_enabled,
                     remote_push_enabled,
+                    pull_request_creation_enabled,
                     updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(repository_id) DO UPDATE SET
                     monitoring_enabled=excluded.monitoring_enabled,
                     ai_analysis_enabled=excluded.ai_analysis_enabled,
@@ -75,6 +78,7 @@ class PermissionRepository:
                     smart_commit_enabled=excluded.smart_commit_enabled,
                     auto_commit_enabled=excluded.auto_commit_enabled,
                     remote_push_enabled=excluded.remote_push_enabled,
+                    pull_request_creation_enabled=excluded.pull_request_creation_enabled,
                     updated_at=excluded.updated_at
                 """,
                 (
@@ -85,6 +89,7 @@ class PermissionRepository:
                     int(model.smart_commit_enabled),
                     int(model.auto_commit_enabled),
                     int(model.remote_push_enabled),
+                    int(model.pull_request_creation_enabled),
                     now,
                 ),
             )
@@ -100,6 +105,7 @@ class PermissionRepository:
         smart_commit_enabled: Optional[bool] = None,
         auto_commit_enabled: Optional[bool] = None,
         remote_push_enabled: Optional[bool] = None,
+        pull_request_creation_enabled: Optional[bool] = None,
     ) -> RepositoryPermissionModel:
         """Update selective permissions for a repository."""
         current = self.get_permissions(repository_id)
@@ -115,6 +121,8 @@ class PermissionRepository:
             current.auto_commit_enabled = auto_commit_enabled
         if remote_push_enabled is not None:
             current.remote_push_enabled = remote_push_enabled
+        if pull_request_creation_enabled is not None:
+            current.pull_request_creation_enabled = pull_request_creation_enabled
 
         return self.save_permissions(current)
 
@@ -128,6 +136,7 @@ class PermissionRepository:
             smart_commit_enabled=False,
             auto_commit_enabled=False,
             remote_push_enabled=False,
+            pull_request_creation_enabled=False,
         )
 
     def list_authorized_repositories(
@@ -144,6 +153,7 @@ class PermissionRepository:
             "smart_commit": "smart_commit_enabled",
             "auto_commit": "auto_commit_enabled",
             "remote_push": "remote_push_enabled",
+            "pull_request_creation": "pull_request_creation_enabled",
         }
         col = column_map.get(required_permission or "monitoring", "monitoring_enabled")
 

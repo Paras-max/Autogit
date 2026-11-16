@@ -17,18 +17,29 @@ from fastapi.responses import StreamingResponse
 from api.routes import get_db
 from database.execution_repository import ExecutionRepository
 from api.schemas import (
+    BranchItem,
+    CommitComparisonItem,
     CommitDetailResponse,
     DashboardActivityItem,
     DashboardOverviewResponse,
+    FileComparisonItem,
     GenericMessageResponse,
     GitHubPushPreviewRequest,
     GitHubPushPreviewResponse,
     GitHubPushRequest,
     GitHubSyncHistoryResponse,
     NotificationResponse,
+    PRValidationSummary,
+    PullRequestCreateRequest,
+    PullRequestPrepareRequest,
+    PullRequestPrepareResponse,
+    PullRequestResponse,
+    PullRequestSyncResponse,
     RemoteStatusResponse,
+    RepositoryBranchesResponse,
     ServiceStatusResponse,
     SyncOperationResponse,
+    ValidationCheckItem,
 )
 from background.health_monitor import HealthMonitor
 from background.service_manager import service_manager
@@ -38,8 +49,10 @@ from database.db import DatabaseManager
 from database.execution_repository import ExecutionRepository
 from database.notification_repository import NotificationRepository
 from database.preference_repository import PreferenceRepository
+from database.pull_request_repository import PullRequestRepository
 from database.sync_repository import SyncRepository
 from integrations.github_client import GitHubClient
+from integrations.github_pr_service import DuplicatePRError, GitHubPRService, RateLimitExceededError
 from integrations.github_sync import GitHubSyncEngine
 from integrations.remote_status import RemoteStatusInspector
 from monitoring.file_monitor import file_monitor
@@ -80,6 +93,14 @@ def get_sync_engine(db_mgr: DatabaseManager = Depends(get_db)) -> GitHubSyncEngi
 
 def get_health_monitor(db_mgr: DatabaseManager = Depends(get_db)) -> HealthMonitor:
     return HealthMonitor(db_mgr)
+
+
+def get_pr_repo(db_mgr: DatabaseManager = Depends(get_db)) -> PullRequestRepository:
+    return PullRequestRepository(db_mgr)
+
+
+def get_pr_service(db_mgr: DatabaseManager = Depends(get_db)) -> GitHubPRService:
+    return GitHubPRService(db_mgr)
 
 
 # ============================================================================
@@ -308,6 +329,170 @@ def get_sync_history(
 ):
     records = sync_repo.list_sync_history(repository_id, limit=limit)
     return [GitHubSyncHistoryResponse(**dataclasses.asdict(r)) for r in records]
+
+
+# ============================================================================
+# 1.5. GitHub Pull Request Automation Endpoints (Step 4)
+# ============================================================================
+
+@phase4_router.get(
+    "/github/repositories/{repository_id}/branches",
+    response_model=RepositoryBranchesResponse,
+    summary="List local and remote branches for a repository",
+)
+def get_repository_branches(
+    repository_id: int,
+    pr_service: GitHubPRService = Depends(get_pr_service),
+):
+    try:
+        data = pr_service.list_branches(repository_id)
+        return RepositoryBranchesResponse(**data)
+    except ValueError as e:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e))
+    except Exception as e:
+        logger.error(f"Failed to list branches: {e}")
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Failed to list repository branches.")
+
+
+@phase4_router.get(
+    "/github/pull-requests/{repository_id}",
+    response_model=List[PullRequestResponse],
+    summary="List Pull Request records for a repository",
+)
+def list_pull_requests(
+    repository_id: int,
+    state: Optional[str] = Query(None, description="Optional filter by PR state: open, closed, merged, draft"),
+    pr_repo: PullRequestRepository = Depends(get_pr_repo),
+):
+    records = pr_repo.list_prs_for_repository(repository_id, state=state)
+    return [PullRequestResponse(**dataclasses.asdict(r)) for r in records]
+
+
+@phase4_router.post(
+    "/github/pull-requests/{repository_id}/prepare",
+    response_model=PullRequestPrepareResponse,
+    summary="Prepare Pull Request comparison, validation, and metadata (does not create PR)",
+)
+def prepare_pull_request_endpoint(
+    repository_id: int,
+    req: PullRequestPrepareRequest,
+    pr_service: GitHubPRService = Depends(get_pr_service),
+):
+    try:
+        prep = pr_service.prepare_pull_request(
+            repository_id=repository_id,
+            source_branch=req.source_branch,
+            target_branch=req.target_branch,
+        )
+        return PullRequestPrepareResponse(**prep)
+    except ValueError as e:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+    except Exception as e:
+        logger.error(f"PR preparation error: {e}")
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Failed to prepare Pull Request.")
+
+
+@phase4_router.post(
+    "/github/pull-requests/{repository_id}",
+    response_model=PullRequestResponse,
+    status_code=status.HTTP_201_CREATED,
+    summary="Create a GitHub Pull Request after explicit user approval",
+)
+def create_pull_request_endpoint(
+    repository_id: int,
+    req: PullRequestCreateRequest,
+    pr_service: GitHubPRService = Depends(get_pr_service),
+):
+    try:
+        created = pr_service.create_pull_request(
+            repository_id=repository_id,
+            source_branch=req.source_branch,
+            target_branch=req.target_branch,
+            title=req.title,
+            description=req.description,
+            is_draft=req.is_draft,
+        )
+        return PullRequestResponse(**dataclasses.asdict(created))
+    except PermissionDeniedError as e:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=str(e))
+    except DuplicatePRError as e:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(e))
+    except RateLimitExceededError as e:
+        raise HTTPException(status_code=status.HTTP_429_TOO_MANY_REQUESTS, detail=str(e))
+    except ValueError as e:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+    except Exception as e:
+        logger.error(f"PR creation error: {e}")
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Failed to create Pull Request.")
+
+
+@phase4_router.get(
+    "/github/pull-requests/{repository_id}/{pr_number}",
+    response_model=PullRequestResponse,
+    summary="Get Pull Request details by number",
+)
+def get_pull_request_detail(
+    repository_id: int,
+    pr_number: int,
+    pr_repo: PullRequestRepository = Depends(get_pr_repo),
+    pr_service: GitHubPRService = Depends(get_pr_service),
+):
+    record = pr_repo.get_pr_by_number(repository_id, pr_number)
+    if not record:
+        try:
+            record = pr_service.refresh_pull_request(repository_id, pr_number)
+        except Exception:
+            pass
+    if not record:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Pull Request #{pr_number} not found.")
+    return PullRequestResponse(**dataclasses.asdict(record))
+
+
+@phase4_router.post(
+    "/github/pull-requests/{repository_id}/{pr_number}/refresh",
+    response_model=PullRequestResponse,
+    summary="Refresh Pull Request status from GitHub and update SQLite",
+)
+def refresh_pull_request_endpoint(
+    repository_id: int,
+    pr_number: int,
+    pr_service: GitHubPRService = Depends(get_pr_service),
+):
+    try:
+        refreshed = pr_service.refresh_pull_request(repository_id, pr_number)
+        return PullRequestResponse(**dataclasses.asdict(refreshed))
+    except PermissionDeniedError as e:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=str(e))
+    except RateLimitExceededError as e:
+        raise HTTPException(status_code=status.HTTP_429_TOO_MANY_REQUESTS, detail=str(e))
+    except ValueError as e:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e))
+    except Exception as e:
+        logger.error(f"Failed to refresh PR #{pr_number}: {e}")
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"Failed to refresh Pull Request #{pr_number}.")
+
+
+@phase4_router.post(
+    "/github/pull-requests/{repository_id}/sync",
+    response_model=PullRequestSyncResponse,
+    summary="Synchronize all Pull Requests for a repository from GitHub",
+)
+def sync_repository_prs_endpoint(
+    repository_id: int,
+    pr_service: GitHubPRService = Depends(get_pr_service),
+):
+    try:
+        synced = pr_service.sync_repository_prs(repository_id)
+        return PullRequestSyncResponse(
+            repository_id=repository_id,
+            synced_count=len(synced),
+            prs=[PullRequestResponse(**dataclasses.asdict(r)) for r in synced],
+        )
+    except RateLimitExceededError as e:
+        raise HTTPException(status_code=status.HTTP_429_TOO_MANY_REQUESTS, detail=str(e))
+    except Exception as e:
+        logger.error(f"Failed to sync PRs for repo {repository_id}: {e}")
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Failed to sync repository Pull Requests.")
 
 
 # ============================================================================

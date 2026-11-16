@@ -193,6 +193,7 @@ class RepositoryPermissionResponse(BaseModel):
     smart_commit_enabled: bool
     auto_commit_enabled: bool
     remote_push_enabled: bool
+    pull_request_creation_enabled: bool = False
     updated_at: Optional[str] = None
 
     model_config = ConfigDict(from_attributes=True)
@@ -205,6 +206,7 @@ class UpdateRepositoryPermissionRequest(BaseModel):
     smart_commit_enabled: Optional[bool] = None
     auto_commit_enabled: Optional[bool] = None
     remote_push_enabled: Optional[bool] = None
+    pull_request_creation_enabled: Optional[bool] = None
 
 
 class ScheduledSessionResponse(BaseModel):
@@ -466,4 +468,122 @@ class GitHubImportRequest(BaseModel):
         None,
         description="Optional custom name override for the repository",
     )
+
+
+# ============================================================================
+# Step 4: GitHub Pull Request Automation Schemas
+# ============================================================================
+
+class BranchItem(BaseModel):
+    name: str
+    is_remote: bool = False
+    is_current: bool = False
+    commit_hash: Optional[str] = None
+    commit_message: Optional[str] = None
+
+
+class RepositoryBranchesResponse(BaseModel):
+    repository_id: int
+    default_branch: str = "main"
+    local_branches: List[BranchItem] = []
+    remote_branches: List[BranchItem] = []
+
+
+class CommitComparisonItem(BaseModel):
+    sha: str
+    short_sha: str
+    message: str
+    author: Optional[str] = None
+    date: Optional[str] = None
+
+
+class FileComparisonItem(BaseModel):
+    filename: str
+    status: str = "modified"  # added, modified, removed
+    additions: int = 0
+    deletions: int = 0
+    patch: Optional[str] = None
+
+
+class ValidationCheckItem(BaseModel):
+    name: str
+    status: str  # PASSED, FAILED, WARNING, NOT_CONFIGURED, NOT_RUN
+    message: Optional[str] = None
+    details: Optional[Dict[str, Any]] = None
+
+
+class PRValidationSummary(BaseModel):
+    overall_status: str = "PASSED"  # PASSED, FAILED, WARNING
+    can_create: bool = True
+    blocking_reasons: List[str] = []
+    checks: List[ValidationCheckItem] = []
+
+
+class PullRequestPrepareRequest(BaseModel):
+    source_branch: str
+    target_branch: str
+
+
+class PullRequestPrepareResponse(BaseModel):
+    repository_id: int
+    source_branch: str
+    target_branch: str
+    is_pushed: bool = True
+    ahead_count: int = 0
+    behind_count: int = 0
+    total_commits: int = 0
+    commits: List[CommitComparisonItem] = []
+    changed_files_count: int = 0
+    changed_files: List[FileComparisonItem] = []
+    additions: int = 0
+    deletions: int = 0
+    validation: PRValidationSummary
+    suggested_title: str = ""
+    suggested_body: str = ""
+    existing_pr_id: Optional[int] = None
+    existing_pr_number: Optional[int] = None
+    existing_pr_url: Optional[str] = None
+    can_create: bool = True
+    blocking_reasons: List[str] = []
+
+
+class PullRequestCreateRequest(BaseModel):
+    source_branch: str
+    target_branch: str
+    title: str
+    description: Optional[str] = None
+    is_draft: bool = False
+
+
+class PullRequestResponse(BaseModel):
+    id: Optional[int] = None
+    repository_id: int
+    pr_number: int
+    github_pr_id: Optional[int] = None
+    title: str
+    body: Optional[str] = None
+    source_branch: str
+    target_branch: str
+    state: str
+    is_draft: bool = False
+    is_merged: bool = False
+    html_url: str
+    diff_url: Optional[str] = None
+    head_commit_sha: Optional[str] = None
+    base_commit_sha: Optional[str] = None
+    created_at: str
+    updated_at: str
+    merged_at: Optional[str] = None
+    last_synced_at: Optional[str] = None
+    last_sync_error: Optional[str] = None
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class PullRequestSyncResponse(BaseModel):
+    repository_id: int
+    synced_count: int
+    prs: List[PullRequestResponse] = []
+    error: Optional[str] = None
+
 

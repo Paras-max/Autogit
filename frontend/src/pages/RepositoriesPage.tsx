@@ -564,6 +564,24 @@ export const RepositoriesPage: React.FC<RepositoriesPageProps> = ({
                       {permissions.remote_push_enabled ? 'ENABLED' : 'DISABLED'}
                     </button>
                   </div>
+
+                  {/* Permission 7: Pull Request Creation */}
+                  <div className="p-3 bg-slate-800/40 border border-slate-800 rounded-xl flex items-center justify-between">
+                    <div>
+                      <span className="text-xs font-semibold text-slate-200 block">7. Pull Request Creation</span>
+                      <span className="text-[10px] text-indigo-400 font-medium">Authorizes preparing and creating Pull Requests on GitHub</span>
+                    </div>
+                    <button
+                      onClick={() => handleTogglePermission('pull_request_creation_enabled', permissions.pull_request_creation_enabled, true)}
+                      className={`px-3 py-1 rounded-lg text-xs font-bold transition-all ${
+                        permissions.pull_request_creation_enabled
+                          ? 'bg-emerald-600 text-white'
+                          : 'bg-slate-700 text-slate-400'
+                      }`}
+                    >
+                      {permissions.pull_request_creation_enabled ? 'ENABLED' : 'DISABLED'}
+                    </button>
+                  </div>
                 </div>
               </div>
 

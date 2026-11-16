@@ -7,6 +7,7 @@ import { SchedulerPage } from './pages/SchedulerPage';
 import { AIAgentsPage } from './pages/AIAgentsPage';
 import { CommitHistoryPage } from './pages/CommitHistoryPage';
 import { GitHubSyncPage } from './pages/GitHubSyncPage';
+import { PullRequestsPage } from './pages/PullRequestsPage';
 import { ValidationPage } from './pages/ValidationPage';
 import { ActivityPage } from './pages/ActivityPage';
 import { NotificationsPage } from './pages/NotificationsPage';
@@ -129,6 +130,8 @@ const App: React.FC = () => {
         return <CommitHistoryPage />;
       case 'github':
         return <GitHubSyncPage />;
+      case 'pull_requests':
+        return <PullRequestsPage repositories={repositories} />;
       case 'validation':
         return <ValidationPage />;
       case 'activity':
