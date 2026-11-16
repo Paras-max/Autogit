@@ -115,6 +115,20 @@ const pushExecutionCommit = (executionId: string | number) =>
 const getExecutionSyncStatus = (executionId: string | number) =>
   fetchJSON<any>(`${API_BASE}/commits/${executionId}/sync-status`);
 
+const previewPushCommits = (data: {
+  repository_id: number;
+  execution_id?: number;
+  commit_hash?: string;
+  branch?: string;
+  remote_name?: string;
+  target_branch?: string;
+}) =>
+  fetchJSON<any>(`${API_BASE}/github/push-preview`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(data),
+  });
+
 const pushCommit = (data: {
   repository_id: number;
   execution_id?: number;
@@ -123,6 +137,8 @@ const pushCommit = (data: {
   remote_name?: string;
   target_branch?: string;
   branch?: string;
+  confirm_descendants?: boolean;
+  expected_head?: string;
 }) =>
   fetchJSON<any>(`${API_BASE}/github/push`, {
     method: 'POST',
@@ -287,6 +303,7 @@ export const api = {
   pushBranch,
   pushExecutionCommit,
   getExecutionSyncStatus,
+  previewPushCommits,
   pushCommit,
   getCommitSyncStatus,
   getPendingSyncCommits,

@@ -232,3 +232,26 @@ export interface ServiceHealth {
   checks?: Record<string, any>;
   [key: string]: any;
 }
+
+export interface AdditionalCommitItem {
+  commit_hash: string;
+  short_hash: string;
+  commit_message: string;
+  author?: string;
+  date?: string;
+}
+
+export interface PushPreviewResponse {
+  repository_id: number;
+  source_branch: string;
+  target_branch: string;
+  remote_name: string;
+  selected_commit_hash: string;
+  selected_commit_message?: string;
+  branch_head_hash: string;
+  is_branch_head: boolean;
+  has_additional_commits: boolean;
+  additional_commits_count: number;
+  additional_commits: AdditionalCommitItem[];
+  total_commits_to_push_count: number;
+}

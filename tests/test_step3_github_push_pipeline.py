@@ -455,7 +455,7 @@ class TestRemoteCommitVerification:
 
         # Push with execution_id pointing to commit_1
         # The branch push will push the whole branch (including commit 2)
-        res = engine.push_repository(repo_model.id, execution_id=exec_model.id, branch="main")
+        res = engine.push_repository(repo_model.id, execution_id=exec_model.id, branch="main", confirm_descendants=True)
 
         assert res["success"] is True
         assert res["push_sync_status"] == "PUSHED"
@@ -757,4 +757,261 @@ class TestApiEndpointsIntegration:
             assert data["push_sync_status"] == "PUSHED"
         finally:
             app.dependency_overrides.clear()
+
+
+class TestPushPreviewAndConfirmationSafeguard:
+    """Group G: Preview Push Commits and Descendant Confirmation Safeguards."""
+
+    def test_preview_selected_commit_is_branch_head(self, tmp_path):
+        local_repo, bare_remote = _create_test_repo_with_bare_remote(tmp_path)
+        db_file = tmp_path / "test_prev1.db"
+        test_db = DatabaseManager(db_file)
+        repo_model = test_db.add_repository("TestPrev1", str(local_repo), remote_url=str(bare_remote))
+        perm_mgr = PermissionManager(test_db)
+        perm_mgr.update_permissions(repo_model.id, remote_push_enabled=True)
+        engine = GitHubSyncEngine(database=test_db, permission_mgr=perm_mgr)
+
+        # Create dev branch with 1 commit
+        subprocess.run(["git", "checkout", "-b", "autogit/dev-prev1"], cwd=local_repo, check=True)
+        (local_repo / "f1.txt").write_text("1", encoding="utf-8")
+        subprocess.run(["git", "add", "f1.txt"], cwd=local_repo, check=True)
+        subprocess.run(["git", "commit", "-m", "feat: commit 1"], cwd=local_repo, check=True)
+        commit_1 = subprocess.run(
+            ["git", "rev-parse", "HEAD"], cwd=local_repo, check=True, capture_output=True, text=True
+        ).stdout.strip()
+
+        preview = engine.preview_push_commits(
+            repository_id=repo_model.id,
+            commit_hash=commit_1,
+            branch="autogit/dev-prev1",
+        )
+        assert preview["is_branch_head"] is True
+        assert preview["has_additional_commits"] is False
+        assert preview["additional_commits_count"] == 0
+        assert preview["additional_commits"] == []
+        assert preview["selected_commit_hash"] == commit_1
+        assert preview["branch_head_hash"] == commit_1
+
+    def test_preview_branch_has_descendant_commits(self, tmp_path):
+        local_repo, bare_remote = _create_test_repo_with_bare_remote(tmp_path)
+        db_file = tmp_path / "test_prev2.db"
+        test_db = DatabaseManager(db_file)
+        repo_model = test_db.add_repository("TestPrev2", str(local_repo), remote_url=str(bare_remote))
+        perm_mgr = PermissionManager(test_db)
+        perm_mgr.update_permissions(repo_model.id, remote_push_enabled=True)
+        engine = GitHubSyncEngine(database=test_db, permission_mgr=perm_mgr)
+
+        subprocess.run(["git", "checkout", "-b", "autogit/dev-prev2"], cwd=local_repo, check=True)
+        (local_repo / "f1.txt").write_text("1", encoding="utf-8")
+        subprocess.run(["git", "add", "f1.txt"], cwd=local_repo, check=True)
+        subprocess.run(["git", "commit", "-m", "feat: base commit"], cwd=local_repo, check=True)
+        commit_a = subprocess.run(
+            ["git", "rev-parse", "HEAD"], cwd=local_repo, check=True, capture_output=True, text=True
+        ).stdout.strip()
+
+        (local_repo / "f2.txt").write_text("2", encoding="utf-8")
+        subprocess.run(["git", "add", "f2.txt"], cwd=local_repo, check=True)
+        subprocess.run(["git", "commit", "-m", "feat: descendant commit"], cwd=local_repo, check=True)
+        commit_b = subprocess.run(
+            ["git", "rev-parse", "HEAD"], cwd=local_repo, check=True, capture_output=True, text=True
+        ).stdout.strip()
+
+        preview = engine.preview_push_commits(
+            repository_id=repo_model.id,
+            commit_hash=commit_a,
+            branch="autogit/dev-prev2",
+        )
+        assert preview["is_branch_head"] is False
+        assert preview["has_additional_commits"] is True
+        assert preview["additional_commits_count"] == 1
+        assert preview["branch_head_hash"] == commit_b
+        assert len(preview["additional_commits"]) == 1
+        assert preview["additional_commits"][0]["commit_hash"] == commit_b
+        assert preview["additional_commits"][0]["commit_message"] == "feat: descendant commit"
+
+    def test_push_blocked_without_descendant_confirmation(self, tmp_path):
+        local_repo, bare_remote = _create_test_repo_with_bare_remote(tmp_path)
+        db_file = tmp_path / "test_prev3.db"
+        test_db = DatabaseManager(db_file)
+        repo_model = test_db.add_repository("TestPrev3", str(local_repo), remote_url=str(bare_remote))
+        perm_mgr = PermissionManager(test_db)
+        perm_mgr.update_permissions(repo_model.id, remote_push_enabled=True)
+        engine = GitHubSyncEngine(database=test_db, permission_mgr=perm_mgr)
+
+        subprocess.run(["git", "checkout", "-b", "autogit/dev-prev3"], cwd=local_repo, check=True)
+        (local_repo / "f1.txt").write_text("1", encoding="utf-8")
+        subprocess.run(["git", "add", "f1.txt"], cwd=local_repo, check=True)
+        subprocess.run(["git", "commit", "-m", "commit 1"], cwd=local_repo, check=True)
+        commit_1 = subprocess.run(
+            ["git", "rev-parse", "HEAD"], cwd=local_repo, check=True, capture_output=True, text=True
+        ).stdout.strip()
+
+        (local_repo / "f2.txt").write_text("2", encoding="utf-8")
+        subprocess.run(["git", "add", "f2.txt"], cwd=local_repo, check=True)
+        subprocess.run(["git", "commit", "-m", "commit 2"], cwd=local_repo, check=True)
+
+        with pytest.raises(ValueError, match="Explicit confirmation \\(confirm_descendants=True\\) is required"):
+            engine.push_repository(
+                repository_id=repo_model.id,
+                branch="autogit/dev-prev3",
+                commit_hash=commit_1,
+                confirm_descendants=False,
+            )
+
+    def test_push_succeeds_with_descendant_confirmation(self, tmp_path):
+        local_repo, bare_remote = _create_test_repo_with_bare_remote(tmp_path)
+        db_file = tmp_path / "test_prev4.db"
+        test_db = DatabaseManager(db_file)
+        repo_model = test_db.add_repository("TestPrev4", str(local_repo), remote_url=str(bare_remote))
+        perm_mgr = PermissionManager(test_db)
+        perm_mgr.update_permissions(repo_model.id, remote_push_enabled=True)
+        engine = GitHubSyncEngine(database=test_db, permission_mgr=perm_mgr)
+
+        subprocess.run(["git", "checkout", "-b", "autogit/dev-prev4"], cwd=local_repo, check=True)
+        (local_repo / "f1.txt").write_text("1", encoding="utf-8")
+        subprocess.run(["git", "add", "f1.txt"], cwd=local_repo, check=True)
+        subprocess.run(["git", "commit", "-m", "commit 1"], cwd=local_repo, check=True)
+        commit_1 = subprocess.run(
+            ["git", "rev-parse", "HEAD"], cwd=local_repo, check=True, capture_output=True, text=True
+        ).stdout.strip()
+
+        (local_repo / "f2.txt").write_text("2", encoding="utf-8")
+        subprocess.run(["git", "add", "f2.txt"], cwd=local_repo, check=True)
+        subprocess.run(["git", "commit", "-m", "commit 2"], cwd=local_repo, check=True)
+        commit_2 = subprocess.run(
+            ["git", "rev-parse", "HEAD"], cwd=local_repo, check=True, capture_output=True, text=True
+        ).stdout.strip()
+
+        res = engine.push_repository(
+            repository_id=repo_model.id,
+            branch="autogit/dev-prev4",
+            commit_hash=commit_1,
+            confirm_descendants=True,
+        )
+        assert res["success"] is True
+        assert res["push_sync_status"] == "PUSHED"
+
+        # Verify remote branch has commit 2 (and commit 1 is reachable)
+        remote_heads = subprocess.run(
+            ["git", "ls-remote", "--heads", str(bare_remote), "refs/heads/autogit/dev-prev4"],
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+        assert commit_2 in remote_heads
+
+    def test_push_aborted_when_branch_head_changes_after_preview(self, tmp_path):
+        local_repo, bare_remote = _create_test_repo_with_bare_remote(tmp_path)
+        db_file = tmp_path / "test_prev5.db"
+        test_db = DatabaseManager(db_file)
+        repo_model = test_db.add_repository("TestPrev5", str(local_repo), remote_url=str(bare_remote))
+        perm_mgr = PermissionManager(test_db)
+        perm_mgr.update_permissions(repo_model.id, remote_push_enabled=True)
+        engine = GitHubSyncEngine(database=test_db, permission_mgr=perm_mgr)
+
+        subprocess.run(["git", "checkout", "-b", "autogit/dev-prev5"], cwd=local_repo, check=True)
+        (local_repo / "f1.txt").write_text("1", encoding="utf-8")
+        subprocess.run(["git", "add", "f1.txt"], cwd=local_repo, check=True)
+        subprocess.run(["git", "commit", "-m", "commit 1"], cwd=local_repo, check=True)
+        commit_1 = subprocess.run(
+            ["git", "rev-parse", "HEAD"], cwd=local_repo, check=True, capture_output=True, text=True
+        ).stdout.strip()
+
+        # Preview recorded head as commit_1
+        # Now add commit 2 locally
+        (local_repo / "f2.txt").write_text("2", encoding="utf-8")
+        subprocess.run(["git", "add", "f2.txt"], cwd=local_repo, check=True)
+        subprocess.run(["git", "commit", "-m", "commit 2"], cwd=local_repo, check=True)
+
+        with pytest.raises(ValueError, match="HEAD changed from .* after confirmation preview"):
+            engine.push_repository(
+                repository_id=repo_model.id,
+                branch="autogit/dev-prev5",
+                commit_hash=commit_1,
+                expected_head=commit_1,
+                confirm_descendants=True,
+            )
+
+    def test_uncommitted_and_staged_changes_untouched_after_preview(self, tmp_path):
+        local_repo, bare_remote = _create_test_repo_with_bare_remote(tmp_path)
+        db_file = tmp_path / "test_prev6.db"
+        test_db = DatabaseManager(db_file)
+        repo_model = test_db.add_repository("TestPrev6", str(local_repo), remote_url=str(bare_remote))
+        perm_mgr = PermissionManager(test_db)
+        perm_mgr.update_permissions(repo_model.id, remote_push_enabled=True)
+        engine = GitHubSyncEngine(database=test_db, permission_mgr=perm_mgr)
+
+        subprocess.run(["git", "checkout", "-b", "autogit/dev-prev6"], cwd=local_repo, check=True)
+        (local_repo / "committed.txt").write_text("clean", encoding="utf-8")
+        subprocess.run(["git", "add", "committed.txt"], cwd=local_repo, check=True)
+        subprocess.run(["git", "commit", "-m", "commit initial"], cwd=local_repo, check=True)
+
+        # Create staged and unstaged dirty state
+        (local_repo / "staged.txt").write_text("staged content", encoding="utf-8")
+        subprocess.run(["git", "add", "staged.txt"], cwd=local_repo, check=True)
+        (local_repo / "unstaged.txt").write_text("unstaged content", encoding="utf-8")
+
+        # Run preview
+        preview = engine.preview_push_commits(
+            repository_id=repo_model.id,
+            branch="autogit/dev-prev6",
+        )
+        assert preview["is_branch_head"] is True
+
+        # Assert working tree and index are untouched
+        staged_status = subprocess.run(
+            ["git", "diff", "--cached", "--name-only"], cwd=local_repo, check=True, capture_output=True, text=True
+        ).stdout.strip()
+        assert "staged.txt" in staged_status
+
+        assert (local_repo / "unstaged.txt").read_text(encoding="utf-8") == "unstaged content"
+
+    def test_main_and_unrelated_branches_unchanged_after_descendant_push(self, tmp_path):
+        local_repo, bare_remote = _create_test_repo_with_bare_remote(tmp_path)
+        db_file = tmp_path / "test_prev7.db"
+        test_db = DatabaseManager(db_file)
+        repo_model = test_db.add_repository("TestPrev7", str(local_repo), remote_url=str(bare_remote))
+        perm_mgr = PermissionManager(test_db)
+        perm_mgr.update_permissions(repo_model.id, remote_push_enabled=True)
+        engine = GitHubSyncEngine(database=test_db, permission_mgr=perm_mgr)
+
+        # Get initial remote main commit
+        initial_main_sha = subprocess.run(
+            ["git", "rev-parse", "refs/heads/main"], cwd=bare_remote, check=True, capture_output=True, text=True
+        ).stdout.strip()
+
+        # Branch 1
+        subprocess.run(["git", "checkout", "-b", "autogit/dev-target1"], cwd=local_repo, check=True)
+        (local_repo / "t1.txt").write_text("t1", encoding="utf-8")
+        subprocess.run(["git", "add", "t1.txt"], cwd=local_repo, check=True)
+        subprocess.run(["git", "commit", "-m", "target 1"], cwd=local_repo, check=True)
+
+        # Branch 2 (unrelated)
+        subprocess.run(["git", "checkout", "main"], cwd=local_repo, check=True)
+        subprocess.run(["git", "checkout", "-b", "autogit/dev-unrelated"], cwd=local_repo, check=True)
+        (local_repo / "u1.txt").write_text("u1", encoding="utf-8")
+        subprocess.run(["git", "add", "u1.txt"], cwd=local_repo, check=True)
+        subprocess.run(["git", "commit", "-m", "unrelated 1"], cwd=local_repo, check=True)
+
+        # Push only Branch 1
+        res = engine.push_repository(
+            repository_id=repo_model.id,
+            branch="autogit/dev-target1",
+            confirm_descendants=True,
+        )
+        assert res["success"] is True
+
+        # Remote references check
+        remote_refs = subprocess.run(
+            ["git", "show-ref"], cwd=bare_remote, check=True, capture_output=True, text=True
+        ).stdout
+
+        assert "refs/heads/autogit/dev-target1" in remote_refs
+        assert "refs/heads/autogit/dev-unrelated" not in remote_refs
+
+        curr_main_sha = subprocess.run(
+            ["git", "rev-parse", "refs/heads/main"], cwd=bare_remote, check=True, capture_output=True, text=True
+        ).stdout.strip()
+        assert curr_main_sha == initial_main_sha
+
 

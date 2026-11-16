@@ -300,6 +300,133 @@ class GitHubSyncEngine:
 
         return resolved_commit, resolved_branch, execution
 
+    def preview_push_commits(
+        self,
+        repository_id: int,
+        execution_id: Optional[int] = None,
+        commit_hash: Optional[str] = None,
+        branch: Optional[str] = None,
+        remote_name: str = "origin",
+        target_branch: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """
+        Inspect the proposed push operation and determine:
+        1. Current HEAD of the source branch.
+        2. Whether the selected commit is the branch HEAD.
+        3. All additional descendant commits that would be transferred by pushing the branch.
+        4. Total commits that will become newly available on the remote.
+        Never modifies local or remote repository.
+        """
+        repo = self.db.get_repository(repository_id)
+        if not repo:
+            raise ValueError(f"Repository {repository_id} does not exist.")
+
+        if not self.permission_mgr.verify_permission(repository_id, "remote_push"):
+            raise PermissionDeniedError(
+                f"Repository '{repo.repository_name}' is not authorized for remote push."
+            )
+
+        repo_path = Path(repo.repository_path).resolve()
+        git_mgr = GitManager(repo_path)
+
+        intended_commit, source_branch, execution = self._resolve_commit_and_branch(
+            repository_id=repository_id,
+            repo_path=repo_path,
+            execution_id=execution_id,
+            branch=branch,
+            commit_hash=commit_hash,
+        )
+
+        remote_target_branch = target_branch or source_branch
+        if not self._validate_ref_name(remote_target_branch):
+            raise ValueError(f"Invalid target branch name: {remote_target_branch!r}")
+
+        remotes = git_mgr.get_remotes()
+        matched_remote = next((r["name"] for r in remotes if r["name"] == remote_name), None)
+        if not matched_remote and remotes:
+            matched_remote = remotes[0]["name"]
+        if not matched_remote:
+            matched_remote = "origin"
+
+        clean_source = source_branch[11:] if source_branch.startswith("refs/heads/") else source_branch
+        clean_target = remote_target_branch[11:] if remote_target_branch.startswith("refs/heads/") else remote_target_branch
+
+        # 1. Identify current HEAD of the source branch
+        ec_head, head_out, _ = safe_subprocess_run(
+            ["git", "rev-parse", f"refs/heads/{clean_source}"],
+            cwd=repo_path,
+            timeout=5.0,
+        )
+        if ec_head != 0 or not head_out.strip():
+            raise ValueError(f"Could not resolve current HEAD for branch '{clean_source}'.")
+        branch_head = head_out.strip()
+
+        # 2. Get message of selected commit
+        selected_msg = None
+        if intended_commit:
+            ec_msg, msg_out, _ = safe_subprocess_run(
+                ["git", "log", "-1", "--format=%s", intended_commit],
+                cwd=repo_path,
+                timeout=5.0,
+            )
+            if ec_msg == 0 and msg_out.strip():
+                selected_msg = msg_out.strip()
+
+        # 3. Check if selected commit is branch HEAD
+        is_branch_head = (intended_commit == branch_head)
+
+        # 4. Determine additional descendant commits
+        additional_commits: List[Dict[str, Any]] = []
+        if not is_branch_head and intended_commit:
+            ec_log, log_out, _ = safe_subprocess_run(
+                ["git", "log", f"{intended_commit}..refs/heads/{clean_source}", "--format=%H|%h|%s|%an|%cI"],
+                cwd=repo_path,
+                timeout=10.0,
+            )
+            if ec_log == 0 and log_out.strip():
+                for line in log_out.strip().splitlines():
+                    parts = line.split("|", 4)
+                    if len(parts) >= 3:
+                        additional_commits.append({
+                            "commit_hash": parts[0],
+                            "short_hash": parts[1],
+                            "commit_message": parts[2],
+                            "author": parts[3] if len(parts) > 3 else "Unknown",
+                            "date": parts[4] if len(parts) > 4 else None,
+                        })
+
+        # 5. Total commits to push against remote tracking ref (if available)
+        remote_ref = f"{matched_remote}/{clean_target}"
+        ec_trk, _, _ = safe_subprocess_run(
+            ["git", "rev-parse", "--verify", remote_ref],
+            cwd=repo_path,
+            timeout=5.0,
+        )
+        if ec_trk == 0:
+            ec_cnt, cnt_out, _ = safe_subprocess_run(
+                ["git", "rev-list", "--count", f"{remote_ref}..refs/heads/{clean_source}"],
+                cwd=repo_path,
+                timeout=5.0,
+            )
+            total_count = int(cnt_out.strip()) if ec_cnt == 0 and cnt_out.strip().isdigit() else len(additional_commits) + 1
+        else:
+            total_count = len(additional_commits) + 1
+
+        return {
+            "repository_id": repository_id,
+            "source_branch": clean_source,
+            "target_branch": clean_target,
+            "remote_name": matched_remote,
+            "selected_commit_hash": intended_commit or branch_head,
+            "selected_commit_message": selected_msg,
+            "branch_head_hash": branch_head,
+            "is_branch_head": is_branch_head,
+            "has_additional_commits": len(additional_commits) > 0,
+            "additional_commits_count": len(additional_commits),
+            "additional_commits": additional_commits,
+            "total_commits_to_push_count": total_count,
+        }
+
     def push_repository(
         self,
         repository_id: int,
@@ -309,6 +436,8 @@ class GitHubSyncEngine:
         commit_hash: Optional[str] = None,
         target_branch: Optional[str] = None,
         token_override: Optional[str] = None,
+        confirm_descendants: bool = False,
+        expected_head: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
         Execute secure, controlled git push to remote with:
@@ -451,6 +580,37 @@ class GitHubSyncEngine:
         clean_source = source_branch[11:] if source_branch.startswith("refs/heads/") else source_branch
         clean_target = remote_target_branch[11:] if remote_target_branch.startswith("refs/heads/") else remote_target_branch
         refspec = f"refs/heads/{clean_source}:refs/heads/{clean_target}"
+
+        # 5b. RECALCULATE BRANCH HEAD AND DESCENDANTS IMMEDIATELY BEFORE PUSH (Requirements 6, 8, 9)
+        ec_head, head_out, _ = safe_subprocess_run(
+            ["git", "rev-parse", f"refs/heads/{clean_source}"],
+            cwd=repo_path,
+            timeout=5.0,
+        )
+        if ec_head != 0 or not head_out.strip():
+            raise ValueError(f"Could not resolve current HEAD for branch '{clean_source}'.")
+        current_branch_head = head_out.strip()
+
+        # Protection against branch HEAD changing between preview and execution
+        if expected_head and expected_head.strip() != current_branch_head:
+            raise ValueError(
+                f"Branch '{clean_source}' HEAD changed from {expected_head[:8]} to {current_branch_head[:8]} "
+                "after confirmation preview. Push aborted for safety."
+            )
+
+        # Protection against transferring unconfirmed descendant commits
+        if intended_commit and intended_commit != current_branch_head:
+            ec_desc, desc_out, _ = safe_subprocess_run(
+                ["git", "log", f"{intended_commit}..refs/heads/{clean_source}", "--format=%H"],
+                cwd=repo_path,
+                timeout=10.0,
+            )
+            descendant_count = len(desc_out.strip().splitlines()) if ec_desc == 0 and desc_out.strip() else 0
+            if descendant_count > 0 and not confirm_descendants:
+                raise ValueError(
+                    f"Branch '{clean_source}' contains {descendant_count} additional commit(s) ahead of selected commit {intended_commit[:8]}. "
+                    "Explicit confirmation (confirm_descendants=True) is required to transfer additional commits."
+                )
 
         logger.info(
             f"Pushing '{source_branch}' to '{matched_remote}/{remote_target_branch}' via exact refspec '{refspec}' "

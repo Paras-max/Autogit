@@ -21,6 +21,8 @@ from api.schemas import (
     DashboardActivityItem,
     DashboardOverviewResponse,
     GenericMessageResponse,
+    GitHubPushPreviewRequest,
+    GitHubPushPreviewResponse,
     GitHubPushRequest,
     GitHubSyncHistoryResponse,
     NotificationResponse,
@@ -85,6 +87,39 @@ def get_health_monitor(db_mgr: DatabaseManager = Depends(get_db)) -> HealthMonit
 # ============================================================================
 
 @phase4_router.post(
+    "/github/push-preview",
+    response_model=GitHubPushPreviewResponse,
+    summary="Preview commits that would be transferred on remote push",
+)
+def preview_push_endpoint(
+    req: GitHubPushPreviewRequest,
+    sync_engine: GitHubSyncEngine = Depends(get_sync_engine),
+):
+    """
+    Safely inspect the proposed push before transferring:
+    - Identifies current branch HEAD
+    - Determines if the selected commit is branch HEAD
+    - Returns all additional descendant commits that would be transferred
+    Never mutates local working tree or remote.
+    """
+    exec_id = req.execution_id
+    try:
+        res = sync_engine.preview_push_commits(
+            repository_id=req.repository_id,
+            execution_id=exec_id,
+            commit_hash=req.commit_hash,
+            branch=req.branch,
+            remote_name=req.remote_name or "origin",
+            target_branch=req.target_branch,
+        )
+        return GitHubPushPreviewResponse(**res)
+    except PermissionDeniedError as e:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=str(e))
+    except ValueError as e:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+
+
+@phase4_router.post(
     "/github/push",
     response_model=SyncOperationResponse,
     summary="Push an authorized commit or branch to remote with verification",
@@ -98,6 +133,7 @@ def push_commit_endpoint(
     Derives and validates the actual local commit and source branch.
     Never assumes main branch for autonomous development commits.
     Enforces repository-level remote_push permission.
+    Recalculates branch HEAD and descendant commits immediately before pushing.
     Verifies remote commit reachable before returning success.
     """
     exec_id = req.execution_id or req.commit_id
@@ -109,6 +145,8 @@ def push_commit_endpoint(
             branch=req.branch,
             remote_name=req.remote_name or "origin",
             target_branch=req.target_branch,
+            confirm_descendants=bool(req.confirm_descendants),
+            expected_head=req.expected_head,
         )
         if not res.get("success") and not res.get("pushed"):
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=res.get("error", "Push failed"))

@@ -331,6 +331,38 @@ class SyncOperationResponse(BaseModel):
     conflicting_files: Optional[List[str]] = []
 
 
+class AdditionalCommitItem(BaseModel):
+    commit_hash: str
+    short_hash: str
+    commit_message: str
+    author: Optional[str] = None
+    date: Optional[str] = None
+
+
+class GitHubPushPreviewRequest(BaseModel):
+    repository_id: int
+    execution_id: Optional[int] = None
+    commit_hash: Optional[str] = None
+    branch: Optional[str] = None
+    remote_name: Optional[str] = "origin"
+    target_branch: Optional[str] = None
+
+
+class GitHubPushPreviewResponse(BaseModel):
+    repository_id: int
+    source_branch: str
+    target_branch: str
+    remote_name: str
+    selected_commit_hash: str
+    selected_commit_message: Optional[str] = None
+    branch_head_hash: str
+    is_branch_head: bool
+    has_additional_commits: bool
+    additional_commits_count: int
+    additional_commits: List[AdditionalCommitItem] = []
+    total_commits_to_push_count: int
+
+
 class GitHubPushRequest(BaseModel):
     repository_id: int
     execution_id: Optional[int] = None
@@ -339,6 +371,8 @@ class GitHubPushRequest(BaseModel):
     remote_name: Optional[str] = "origin"
     target_branch: Optional[str] = None
     branch: Optional[str] = None
+    confirm_descendants: Optional[bool] = False
+    expected_head: Optional[str] = None
 
 
 class GitHubSyncHistoryResponse(BaseModel):

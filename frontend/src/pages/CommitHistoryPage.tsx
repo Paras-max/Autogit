@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useState } from 'react';
 import { api } from '../services/api';
-import { CommitRecord, Repository } from '../types';
+import { CommitRecord, PushPreviewResponse, Repository } from '../types';
 import {
   GitCommit,
   Search,
@@ -12,6 +12,7 @@ import {
   Upload,
   RefreshCw,
   AlertCircle,
+  AlertTriangle,
   Clock,
   CloudOff,
   Cloud,
@@ -118,6 +119,10 @@ export const CommitHistoryPage: React.FC = () => {
   const [pushError, setPushError] = useState<string | null>(null);
   const [syncStatus, setSyncStatus] = useState<Record<string | number, any>>({});
   const [confirmPushCommit, setConfirmPushCommit] = useState<CommitRecord | null>(null);
+  const [pushPreview, setPushPreview] = useState<PushPreviewResponse | null>(null);
+  const [previewLoading, setPreviewLoading] = useState<boolean>(false);
+  const [previewError, setPreviewError] = useState<string | null>(null);
+  const [confirmedDescendants, setConfirmedDescendants] = useState<boolean>(false);
 
   const loadData = useCallback(async () => {
     setLoading(true);
@@ -212,7 +217,33 @@ export const CommitHistoryPage: React.FC = () => {
     return msg.includes(q) || hash.includes(q) || branch.includes(q) || repo.includes(q);
   });
 
-  const handlePush = async (commit: CommitRecord) => {
+  const openPushModal = async (commit: CommitRecord) => {
+    setConfirmPushCommit(commit);
+    setPushPreview(null);
+    setPreviewError(null);
+    setConfirmedDescendants(false);
+    setPreviewLoading(true);
+
+    try {
+      const repoId = commit.repository_id;
+      if (!repoId) throw new Error('Repository ID missing on commit record.');
+      const prev = await api.previewPushCommits({
+        repository_id: repoId,
+        execution_id: commit.execution_id,
+        commit_hash: commit.commit_hash || undefined,
+        branch: commit.branch || undefined,
+        target_branch: commit.target_branch || undefined,
+        remote_name: commit.remote_name || 'origin',
+      });
+      setPushPreview(prev);
+    } catch (err: any) {
+      setPreviewError(err.message || 'Failed to inspect branch commits for preview');
+    } finally {
+      setPreviewLoading(false);
+    }
+  };
+
+  const handlePush = async (commit: CommitRecord, confirmDescendants = false, expectedHead?: string) => {
     const hash = commit.commit_hash || '';
     const repoId = commit.repository_id;
     setPushingId(hash);
@@ -227,12 +258,16 @@ export const CommitHistoryPage: React.FC = () => {
           branch: commit.branch || undefined,
           target_branch: commit.target_branch || undefined,
           remote_name: commit.remote_name || 'origin',
+          confirm_descendants: confirmDescendants,
+          expected_head: expectedHead,
         });
       } else if (repoId) {
         await api.pushCommit({
           repository_id: repoId,
           branch: commit.branch || undefined,
           remote_name: commit.remote_name || 'origin',
+          confirm_descendants: confirmDescendants,
+          expected_head: expectedHead,
         });
       } else {
         throw new Error('Not enough information to push this commit.');
@@ -453,7 +488,7 @@ export const CommitHistoryPage: React.FC = () => {
                           {/* Push button */}
                           {pushable && (
                             <button
-                              onClick={() => setConfirmPushCommit(c)}
+                              onClick={() => openPushModal(c)}
                               disabled={isPushing}
                               className="inline-flex items-center gap-1.5 text-xs font-medium px-2.5 py-1.5 rounded bg-emerald-600 hover:bg-emerald-700 text-white disabled:opacity-60 disabled:cursor-not-allowed shadow-sm"
                               title="Push to GitHub"
@@ -494,61 +529,142 @@ export const CommitHistoryPage: React.FC = () => {
                 Confirm GitHub Push
               </h3>
               <button
-                onClick={() => setConfirmPushCommit(null)}
+                onClick={() => {
+                  setConfirmPushCommit(null);
+                  setPushPreview(null);
+                  setConfirmedDescendants(false);
+                }}
                 className="text-slate-400 hover:text-slate-600 dark:hover:text-slate-200"
               >
                 <X className="w-5 h-5" />
               </button>
             </div>
-            <div className="mt-4 space-y-3 text-sm">
-              <p className="text-slate-600 dark:text-slate-300">
-                Are you sure you want to push this commit to the remote repository?
-              </p>
-              <div className="bg-slate-50 dark:bg-slate-900/50 p-4 rounded-lg space-y-2 border border-slate-200 dark:border-slate-700 font-mono text-xs">
-                <div>
-                  <span className="text-slate-500 dark:text-slate-400 font-sans font-semibold">Repository:</span>{' '}
-                  <span className="text-slate-900 dark:text-slate-100 font-bold">{confirmPushCommit.repo_name || confirmPushCommit.repository_name || 'N/A'}</span>
+
+            {previewLoading ? (
+              <div className="py-8 flex flex-col items-center justify-center gap-3 text-slate-500">
+                <Loader2 className="w-6 h-6 animate-spin text-emerald-500" />
+                <span className="text-sm">Inspecting branch commits on remote...</span>
+              </div>
+            ) : previewError ? (
+              <div className="mt-4 space-y-4">
+                <div className="p-3 bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800 rounded-lg text-sm text-red-700 dark:text-red-300 flex items-start gap-2">
+                  <AlertCircle className="w-5 h-5 flex-shrink-0 mt-0.5" />
+                  <div>
+                    <div className="font-semibold">Push Preview Error</div>
+                    <div className="text-xs mt-1">{previewError}</div>
+                  </div>
                 </div>
-                <div>
-                  <span className="text-slate-500 dark:text-slate-400 font-sans font-semibold">Source Branch:</span>{' '}
-                  <span className="text-emerald-600 dark:text-emerald-400 font-bold">{confirmPushCommit.source_branch || confirmPushCommit.branch || 'main'}</span>
-                </div>
-                <div>
-                  <span className="text-slate-500 dark:text-slate-400 font-sans font-semibold">Remote Name:</span>{' '}
-                  <span className="text-slate-700 dark:text-slate-300">{confirmPushCommit.remote_name || 'origin'}</span>
-                </div>
-                <div>
-                  <span className="text-slate-500 dark:text-slate-400 font-sans font-semibold">Target Branch:</span>{' '}
-                  <span className="text-emerald-600 dark:text-emerald-400 font-bold">{confirmPushCommit.target_branch || confirmPushCommit.source_branch || confirmPushCommit.branch || 'main'}</span>
-                </div>
-                <div>
-                  <span className="text-slate-500 dark:text-slate-400 font-sans font-semibold">Commit Hash:</span>{' '}
-                  <span className="text-primary-600 dark:text-primary-400">{confirmPushCommit.commit_hash || 'HEAD'}</span>
+                <div className="flex justify-end">
+                  <button
+                    onClick={() => {
+                      setConfirmPushCommit(null);
+                      setPushPreview(null);
+                      setConfirmedDescendants(false);
+                    }}
+                    className="px-4 py-2 text-sm font-medium text-slate-700 dark:text-slate-300 bg-slate-100 dark:bg-slate-700 hover:bg-slate-200 rounded-lg"
+                  >
+                    Close
+                  </button>
                 </div>
               </div>
-              <p className="text-xs text-slate-500 italic">
-                AutoGit AI will securely push using temporary credentials and verify that the commit is reachable on the remote branch before marking as pushed.
-              </p>
-            </div>
-            <div className="mt-6 flex justify-end gap-3">
-              <button
-                onClick={() => setConfirmPushCommit(null)}
-                className="px-4 py-2 text-sm font-medium text-slate-700 dark:text-slate-300 bg-slate-100 dark:bg-slate-700 hover:bg-slate-200 rounded-lg"
-              >
-                Cancel
-              </button>
-              <button
-                onClick={() => {
-                  const target = confirmPushCommit;
-                  setConfirmPushCommit(null);
-                  handlePush(target);
-                }}
-                className="px-4 py-2 text-sm font-medium text-white bg-emerald-600 hover:bg-emerald-700 rounded-lg shadow-sm flex items-center gap-2"
-              >
-                <Upload className="w-4 h-4" />
-                Confirm & Push
-              </button>
-            </div>
+            ) : (
+              <div className="mt-4 space-y-4 text-sm">
+                <p className="text-slate-600 dark:text-slate-300">
+                  Verify the transfer details before pushing to the remote repository:
+                </p>
+                <div className="bg-slate-50 dark:bg-slate-900/50 p-4 rounded-lg space-y-2 border border-slate-200 dark:border-slate-700 font-mono text-xs">
+                  <div>
+                    <span className="text-slate-500 dark:text-slate-400 font-sans font-semibold">Repository:</span>{' '}
+                    <span className="text-slate-900 dark:text-slate-100 font-bold">{confirmPushCommit.repo_name || confirmPushCommit.repository_name || 'N/A'}</span>
+                  </div>
+                  <div>
+                    <span className="text-slate-500 dark:text-slate-400 font-sans font-semibold">Source Branch:</span>{' '}
+                    <span className="text-emerald-600 dark:text-emerald-400 font-bold">{pushPreview?.source_branch || confirmPushCommit.source_branch || confirmPushCommit.branch || 'main'}</span>
+                  </div>
+                  <div>
+                    <span className="text-slate-500 dark:text-slate-400 font-sans font-semibold">Remote Name:</span>{' '}
+                    <span className="text-slate-700 dark:text-slate-300">{pushPreview?.remote_name || confirmPushCommit.remote_name || 'origin'}</span>
+                  </div>
+                  <div>
+                    <span className="text-slate-500 dark:text-slate-400 font-sans font-semibold">Target Branch:</span>{' '}
+                    <span className="text-emerald-600 dark:text-emerald-400 font-bold">{pushPreview?.target_branch || confirmPushCommit.target_branch || 'main'}</span>
+                  </div>
+                  <div>
+                    <span className="text-slate-500 dark:text-slate-400 font-sans font-semibold">Selected Commit:</span>{' '}
+                    <span className="text-primary-600 dark:text-primary-400 font-bold">{pushPreview?.selected_commit_hash ? pushPreview.selected_commit_hash.slice(0, 8) : (confirmPushCommit.commit_hash?.slice(0, 8) || 'HEAD')}</span>
+                    {pushPreview?.selected_commit_message && (
+                      <span className="text-slate-500 dark:text-slate-400 font-sans ml-2 truncate">({pushPreview.selected_commit_message})</span>
+                    )}
+                  </div>
+                </div>
+
+                {pushPreview?.is_branch_head ? (
+                  <div className="flex items-center gap-2 p-2.5 bg-emerald-50 dark:bg-emerald-950/40 border border-emerald-200 dark:border-emerald-800 rounded-lg text-xs text-emerald-800 dark:text-emerald-300">
+                    <CheckCircle2 className="w-4 h-4 text-emerald-600 dark:text-emerald-400 flex-shrink-0" />
+                    <span>Selected commit is the current branch HEAD. Normal push ready.</span>
+                  </div>
+                ) : pushPreview?.has_additional_commits ? (
+                  <div className="space-y-2 p-3 bg-amber-50 dark:bg-amber-950/40 border border-amber-200 dark:border-amber-800 rounded-lg text-xs text-amber-800 dark:text-amber-300">
+                    <div className="flex items-center gap-2 font-semibold text-amber-900 dark:text-amber-200">
+                      <AlertTriangle className="w-4 h-4 text-amber-600 dark:text-amber-400 flex-shrink-0" />
+                      <span>This branch contains {pushPreview.additional_commits_count} additional commit(s) ahead of selected commit:</span>
+                    </div>
+                    <div className="max-h-28 overflow-y-auto space-y-1 font-mono text-[11px] bg-white/60 dark:bg-slate-900/60 p-2 rounded border border-amber-200/50 dark:border-amber-800/50">
+                      {pushPreview.additional_commits.map((c) => (
+                        <div key={c.commit_hash} className="flex items-center gap-2">
+                          <span className="font-bold text-amber-700 dark:text-amber-400">{c.short_hash}</span>
+                          <span className="text-slate-700 dark:text-slate-300 truncate">{c.commit_message}</span>
+                        </div>
+                      ))}
+                    </div>
+                    <label className="flex items-start gap-2 pt-1 cursor-pointer select-none">
+                      <input
+                        type="checkbox"
+                        checked={confirmedDescendants}
+                        onChange={(e) => setConfirmedDescendants(e.target.checked)}
+                        className="mt-0.5 rounded border-amber-400 text-amber-600 focus:ring-amber-500"
+                      />
+                      <span className="font-medium text-amber-900 dark:text-amber-200">
+                        I understand that {pushPreview.additional_commits_count} additional commit(s) will be transferred to the remote.
+                      </span>
+                    </label>
+                  </div>
+                ) : null}
+
+                <p className="text-xs text-slate-500 italic">
+                  AutoGit AI will securely push using temporary credentials and verify that the commit is reachable on the remote branch before marking as pushed.
+                </p>
+
+                <div className="mt-6 flex justify-end gap-3 pt-2">
+                  <button
+                    onClick={() => {
+                      setConfirmPushCommit(null);
+                      setPushPreview(null);
+                      setConfirmedDescendants(false);
+                    }}
+                    className="px-4 py-2 text-sm font-medium text-slate-700 dark:text-slate-300 bg-slate-100 dark:bg-slate-700 hover:bg-slate-200 rounded-lg"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    disabled={pushPreview?.has_additional_commits && !confirmedDescendants}
+                    onClick={() => {
+                      const target = confirmPushCommit;
+                      const conf = confirmedDescendants;
+                      const expHead = pushPreview?.branch_head_hash;
+                      setConfirmPushCommit(null);
+                      setPushPreview(null);
+                      setConfirmedDescendants(false);
+                      handlePush(target, conf, expHead);
+                    }}
+                    className="px-4 py-2 text-sm font-medium text-white bg-emerald-600 hover:bg-emerald-700 disabled:opacity-50 disabled:cursor-not-allowed rounded-lg shadow-sm flex items-center gap-2"
+                  >
+                    <Upload className="w-4 h-4" />
+                    Confirm & Push
+                  </button>
+                </div>
+              </div>
+            )}
           </div>
         </div>
       )}
@@ -653,7 +769,7 @@ export const CommitHistoryPage: React.FC = () => {
                 <div className="pt-2">
                   <button
                     onClick={() => {
-                      handlePush(selectedCommit);
+                      openPushModal(selectedCommit);
                       setSelectedCommit(null);
                     }}
                     disabled={pushingId === (selectedCommit.commit_hash || '')}
